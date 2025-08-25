@@ -1,7 +1,5 @@
 FROM debian:11-slim
 ENV DEBIAN_FRONTEND=noninteractive
-FROM debian:11-slim
-ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget python3 python3-pip aria2 megatools p7zip-full ffmpeg \
     qbittorrent-nox=4.2.5-0.1 \
