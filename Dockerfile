@@ -1,11 +1,12 @@
 # Use Debian 11 "Bullseye" as the stable base image
 FROM debian:11-slim
 
-# Set environment variables to prevent interactive prompts
+# Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHON_VERSION=3.10.13
 
-# Install all build dependencies and runtime dependencies in a single layer
+# STEP 1: Install system dependencies and compile Python
+# This entire layer will be cached. It only re-runs if this command changes.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     build-essential \
@@ -25,11 +26,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     megatools \
     p7zip-full \
     ffmpeg \
+    libmagic-dev \
     qbittorrent-nox=4.2.5-0.1 \
- && rm -rf /var/lib/apt/lists/*
-
-# Compile and install Python 3.10 from source, making it the default
-RUN wget "https://www.python.org/ftp/python/$PYTHON_VERSION/Python-$PYTHON_VERSION.tar.xz" \
+ && rm -rf /var/lib/apt/lists/* \
+ && wget "https://www.python.org/ftp/python/$PYTHON_VERSION/Python-$PYTHON_VERSION.tar.xz" \
     && tar -xvf "Python-$PYTHON_VERSION.tar.xz" \
     && cd "Python-$PYTHON_VERSION" \
     && ./configure --enable-optimizations --with-ensurepip=install \
@@ -40,12 +40,14 @@ RUN wget "https://www.python.org/ftp/python/$PYTHON_VERSION/Python-$PYTHON_VERSI
 # Set the working directory
 WORKDIR /usr/src/app
 
-# Copy and install requirements using the new default pip3
+# STEP 2: Install Python dependencies
+# This layer is cached and only re-runs if requirements.txt changes
 COPY requirements.txt .
 RUN pip3 install --no-cache-dir -r requirements.txt
 
-# Copy the rest of the application code
+# STEP 3: Copy the application code
+# This is one of the last steps, so changes to your code won't trigger a full reinstall
 COPY . .
 
-# Run the bot using the new default python3
-CMD ["python3", "-m", "bot"]
+# Define the command to start the application using your script
+CMD ["/bin/bash", "start.sh"]
