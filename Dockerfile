@@ -28,8 +28,8 @@ RUN apt-get update && \
     # Download and install qbittorrent-nox.
     ARCH=$(dpkg --print-architecture) && \
     case "$ARCH" in \
-      amd64)  DEB_URL_QBIT="https://launchpadlibrarian.net/532828789/qbittorrent-nox_4.2.5-0.1ubuntu1_amd64.deb" ;; \
-      arm64)  DEB_URL_QBIT="https://launchpadlibrarian.net/532830316/qbittorrent-nox_4.2.5-0.1ubuntu1_arm64.deb" ;; \
+      amd64)  DEB_URL_QBIT="https://launchpadlibrarian.net/573077479/qbittorrent-nox_4.2.5-0.1ubuntu2_amd64.deb" ;; \
+      arm64)  DEB_URL_QBIT="https://launchpadlibrarian.net/573084745/qbittorrent-nox_4.2.5-0.1ubuntu2_arm64.deb" ;; \
       *)      echo "Unsupported architecture: $ARCH" && exit 1 ;; \
     esac && \
     wget -O /tmp/qbittorrent-nox.deb "$DEB_URL_QBIT" && \
