@@ -9,7 +9,7 @@ ENV TZ=Asia/Kolkata
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     tzdata \
-    wget ca-certificates python3 python3-pip python3.10-venv aria2 curl git ffmpeg \
+    wget ca-certificates python3 python3-pip python3.10-venv aria2 curl git ffmpeg libmagic1 \
     libssl-dev libboost-system-dev libboost-chrono-dev libboost-log-dev libboost-thread-dev \
     libstdc++6 libqt5core5a libqt5network5 libqt5xml5 \
     build-essential python3-dev && \
