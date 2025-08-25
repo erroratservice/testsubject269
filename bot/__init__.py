@@ -146,7 +146,7 @@ if not ospath.exists(".netrc"):
     with open(".netrc", "w"):
         pass
 run(
-    "chmod 600 .netrc && cp .netrc /root/.netrc && chmod +x aria-nox.sh && ./aria-nox.sh",
+    "chmod 600 .netrc && cp .netrc /root/.netrc && chmod +x aria-nox-nzb.sh && ./aria-nox-nzb.sh",
     shell=True,
 )
 
