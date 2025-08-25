@@ -54,7 +54,7 @@ LOGGER = getLogger(__name__)
 
 load_dotenv("config.env", override=True)
 
-intervals = {"status": {}, "qb": "", "jd": "", "nzb": "", "stopAll": False}
+intervals = {"status": {}, "qb": "", "stopAll": False}
 qb_torrents = {}
 drives_names = []
 drives_ids = []
@@ -141,11 +141,12 @@ if DATABASE_URL:
 else:
     config_dict = {}
 
+
 if not ospath.exists(".netrc"):
     with open(".netrc", "w"):
         pass
 run(
-    "chmod 600 .netrc && cp .netrc /root/.netrc && chmod +x aria-nox-nzb.sh && ./aria-nox-nzb.sh",
+    "chmod 600 .netrc && cp .netrc /root/.netrc && chmod +x aria-nox.sh && ./aria-nox.sh",
     shell=True,
 )
 
@@ -266,7 +267,7 @@ else:
     try:
         SEARCH_PLUGINS = eval(SEARCH_PLUGINS)
     except:
-        log_error(f"Wrong USENET_SERVERS format: {SEARCH_PLUGINS}")
+        log_error(f"Wrong SEARCH_PLUGINS format: {SEARCH_PLUGINS}")
         SEARCH_PLUGINS = ""
 
 MAX_SPLIT_SIZE = 4194304000 if IS_PREMIUM_USER else 2097152000
@@ -524,7 +525,6 @@ bot_name = bot.me.username
 
 scheduler = AsyncIOScheduler(timezone=str(get_localzone()), event_loop=bot_loop)
 
-
 def get_qb_options():
     global qbit_options
     if not qbit_options:
@@ -539,7 +539,6 @@ def get_qb_options():
         qb_opt = {**qbit_options}
         qbittorrent_client.app_set_preferences(qb_opt)
 
-
 get_qb_options()
 
 aria2 = ariaAPI(ariaClient(host="http://localhost", port=6800, secret=""))
@@ -548,6 +547,3 @@ if not aria2_options:
 else:
     a2c_glo = {op: aria2_options[op] for op in aria2c_global if op in aria2_options}
     aria2.set_global_options(a2c_glo)
-
-
-bot_loop.run_until_complete(get_qb_options())
