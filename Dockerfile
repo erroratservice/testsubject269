@@ -1,7 +1,7 @@
 FROM debian:11-slim
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    wget python3 python3-pip aria2 megatools p7zip-full ffmpeg \
+    wget python3 python3-pip aria2 megatools p7zip-full ffmpeg build-essential python3-dev \
     qbittorrent-nox=4.2.5-0.1 \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /usr/src/app
