@@ -24,7 +24,7 @@ pymongo
 pyrofork
 python-dotenv
 python-magic
-qbittorrent-api
+qbittorrent-api==2021.12.26
 requests
 telegraph
 tenacity
