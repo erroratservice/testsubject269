@@ -60,13 +60,8 @@ class QbittorrentStatus:
             return MirrorStatus.STATUS_PAUSED
         elif state in ["checkingUP", "checkingDL"]:
             return MirrorStatus.STATUS_CHECK
-        elif state in ["stalledUP", "uploading"]:
-            if self.seeding:
-                return MirrorStatus.STATUS_SEED
-            elif self._info.progress >= 1:
-                return MirrorStatus.STATUS_CHECK
-            else:
-                return MirrorStatus.STATUS_DOWNLOAD
+        elif state in ["stalledUP", "uploading"] and self.seeding:
+            return MirrorStatus.STATUS_SEED
         else:
             return MirrorStatus.STATUS_DOWNLOAD
 
