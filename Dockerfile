@@ -20,7 +20,7 @@ RUN wget https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VER
 
 # Step 2: App/system deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    aria2 megatools p7zip-full ffmpeg libmagic-dev procps\
+    aria2 megatools p7zip-full ffmpeg libmagic-dev procps git\
     qbittorrent-nox=4.2.5-0.1 \
  && rm -rf /var/lib/apt/lists/*
 
