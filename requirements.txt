@@ -17,7 +17,6 @@ httpx
 lxml
 motor
 natsort
-par2cmdline-turbo
 pillow
 psutil
 pymongo
