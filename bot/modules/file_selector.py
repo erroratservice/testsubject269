@@ -50,7 +50,7 @@ async def select(_, message):
     elif len(msg) == 1:
         msg = (
             "Reply to an active /cmd which was used to start the download or add gid along with cmd\n\n"
-            + "This command mainly for selection incase you decided to select files from already added torrent/nzb. "
+            + "This command mainly for selection incase you decided to select files from an already added torrent. "
             + "But you can always use /cmd with arg `s` to select files before download start."
         )
         await send_message(message, msg)
@@ -96,7 +96,7 @@ async def select(_, message):
                 )
         task.listener.select = True
     except:
-        await send_message(message, "This is not a bittorrent or sabnzbd task!")
+        await send_message(message, "This is not a bittorrent task!")
         return
 
     SBUTTONS = bt_selection_buttons(id_)

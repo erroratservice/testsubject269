@@ -65,13 +65,6 @@ class DbManager:
         # Save qbittorrent options
         if await self._db.settings.qbittorrent.find_one({"_id": BOT_ID}) is None:
             await self.save_qbit_settings()
-        # Save nzb config
-        if await self._db.settings.nzb.find_one({"_id": BOT_ID}) is None:
-            async with aiopen("sabnzbd/SABnzbd.ini", "rb+") as pf:
-                nzb_conf = await pf.read()
-            await self._db.settings.nzb.update_one(
-                {"_id": BOT_ID}, {"$set": {"SABnzbd__ini": nzb_conf}}, upsert=True
-            )
         # User Data
         if await self._db.users.find_one():
             rows = self._db.users.find({})
@@ -162,13 +155,6 @@ class DbManager:
         )
         if path == "config.env":
             await self.update_deploy_config()
-
-    async def update_nzb_config(self):
-        async with aiopen("sabnzbd/SABnzbd.ini", "rb+") as pf:
-            nzb_conf = await pf.read()
-        await self._db.settings.nzb.replace_one(
-            {"_id": BOT_ID}, {"SABnzbd__ini": nzb_conf}, upsert=True
-        )
 
     async def update_user_data(self, user_id):
         if self._return:
