@@ -31,9 +31,7 @@ from ..helper.mirror_leech_utils.download_utils.direct_link_generator import (
     direct_link_generator,
 )
 from ..helper.mirror_leech_utils.download_utils.gd_download import add_gd_download
-from ..helper.mirror_leech_utils.download_utils.jd_download import add_jd_download
 from ..helper.mirror_leech_utils.download_utils.qbit_download import add_qb_torrent
-from ..helper.mirror_leech_utils.download_utils.nzb_downloader import add_nzb
 from ..helper.mirror_leech_utils.download_utils.rclone_download import (
     add_rclone_download,
 )
@@ -52,8 +50,6 @@ class Mirror(TaskListener):
         message,
         is_qbit=False,
         is_leech=False,
-        is_jd=False,
-        is_nzb=False,
         same_dir=None,
         bulk=None,
         multi_tag=None,
@@ -72,8 +68,6 @@ class Mirror(TaskListener):
         super().__init__()
         self.is_qbit = is_qbit
         self.is_leech = is_leech
-        self.is_jd = is_jd
-        self.is_nzb = is_nzb
 
     async def new_event(self):
         text = self.message.text.split("\n")
@@ -240,8 +234,6 @@ class Mirror(TaskListener):
                 nextmsg,
                 self.is_qbit,
                 self.is_leech,
-                self.is_jd,
-                self.is_nzb,
                 self.same_dir,
                 self.bulk,
                 self.multi_tag,
@@ -269,7 +261,7 @@ class Mirror(TaskListener):
                     reply_to = None
             elif reply_to.document and (
                 file_.mime_type == "application/x-bittorrent"
-                or file_.file_name.endswith((".torrent", ".dlc", ".nzb"))
+                or file_.file_name.endswith(".torrent")
             ):
                 self.link = await reply_to.download()
                 file_ = None
@@ -304,9 +296,7 @@ class Mirror(TaskListener):
             return
 
         if (
-            not self.is_jd
-            and not self.is_nzb
-            and not self.is_qbit
+            not self.is_qbit
             and not is_magnet(self.link)
             and not is_rclone_path(self.link)
             and not is_gdrive_link(self.link)
@@ -337,12 +327,8 @@ class Mirror(TaskListener):
             )
         elif isinstance(self.link, dict):
             await add_direct_download(self, path)
-        elif self.is_jd:
-            await add_jd_download(self, path)
         elif self.is_qbit:
             await add_qb_torrent(self, path, ratio, seed_time)
-        elif self.is_nzb:
-            await add_nzb(self, path)
         elif is_rclone_path(self.link):
             await add_rclone_download(self, f"{path}/")
         elif is_gdrive_link(self.link) or is_gdrive_id(self.link):
@@ -366,14 +352,6 @@ async def qb_mirror(client, message):
     bot_loop.create_task(Mirror(client, message, is_qbit=True).new_event())
 
 
-async def jd_mirror(client, message):
-    bot_loop.create_task(Mirror(client, message, is_jd=True).new_event())
-
-
-async def nzb_mirror(client, message):
-    bot_loop.create_task(Mirror(client, message, is_nzb=True).new_event())
-
-
 async def leech(client, message):
     bot_loop.create_task(Mirror(client, message, is_leech=True).new_event())
 
@@ -381,16 +359,6 @@ async def leech(client, message):
 async def qb_leech(client, message):
     bot_loop.create_task(
         Mirror(client, message, is_qbit=True, is_leech=True).new_event()
-    )
-
-
-async def jd_leech(client, message):
-    bot_loop.create_task(Mirror(client, message, is_leech=True, is_jd=True).new_event())
-
-
-async def nzb_leech(client, message):
-    bot_loop.create_task(
-        Mirror(client, message, is_leech=True, is_nzb=True).new_event()
     )
 
 
@@ -410,20 +378,6 @@ bot.add_handler(
 )
 bot.add_handler(
     MessageHandler(
-        jd_mirror,
-        filters=command(BotCommands.JdMirrorCommand, case_sensitive=True)
-        & CustomFilters.authorized,
-    )
-)
-bot.add_handler(
-    MessageHandler(
-        nzb_mirror,
-        filters=command(BotCommands.NzbMirrorCommand, case_sensitive=True)
-        & CustomFilters.authorized,
-    )
-)
-bot.add_handler(
-    MessageHandler(
         leech,
         filters=command(BotCommands.LeechCommand, case_sensitive=True)
         & CustomFilters.authorized,
@@ -433,20 +387,6 @@ bot.add_handler(
     MessageHandler(
         qb_leech,
         filters=command(BotCommands.QbLeechCommand, case_sensitive=True)
-        & CustomFilters.authorized,
-    )
-)
-bot.add_handler(
-    MessageHandler(
-        jd_leech,
-        filters=command(BotCommands.JdLeechCommand, case_sensitive=True)
-        & CustomFilters.authorized,
-    )
-)
-bot.add_handler(
-    MessageHandler(
-        nzb_leech,
-        filters=command(BotCommands.NzbLeechCommand, case_sensitive=True)
         & CustomFilters.authorized,
     )
 )
