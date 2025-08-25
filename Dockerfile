@@ -1,61 +1,33 @@
-# Use Debian 11 "Bullseye" as the stable base image
 FROM debian:11-slim
 
-# Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHON_VERSION=3.10.13
 
-# STEP 1: Install only the build dependencies required to compile Python.
-# This layer is highly stable and will likely never need to be rebuilt.
+# Step 0: Certificates + toolchain
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    wget \
-    build-essential \
-    libssl-dev \
-    zlib1g-dev \
-    libncurses5-dev \
-    libgdbm-dev \
-    libnss3-dev \
-    libsqlite3-dev \
-    libreadline-dev \
-    libffi-dev \
-    curl \
-    xz-utils \
-    tk-dev \
-    liblzma-dev \
- && rm -rf /var/lib/apt/lists/*
+    ca-certificates wget curl xz-utils \
+    build-essential libssl-dev zlib1g-dev libncurses5-dev libgdbm-dev \
+    libnss3-dev libsqlite3-dev libreadline-dev libffi-dev tk-dev liblzma-dev \
+ && update-ca-certificates && rm -rf /var/lib/apt/lists/*
 
-# STEP 2: Compile and install Python.
-# This layer is also very stable and will be cached.
-RUN wget "https://www.python.org/ftp/python/$PYTHON_VERSION/Python-$PYTHON_VERSION.tar.xz" \
-    && tar -xvf "Python-$PYTHON_VERSION.tar.xz" \
-    && cd "Python-$PYTHON_VERSION" \
-    && ./configure --enable-optimizations --with-ensurepip=install \
-    && make -j"$(nproc)" \
-    && make install \
-    && rm -rf /Python-$PYTHON_VERSION*
+# Step 1: Build Python
+RUN wget https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tar.xz \
+ && tar -xvf Python-${PYTHON_VERSION}.tar.xz \
+ && cd Python-${PYTHON_VERSION} \
+ && ./configure --enable-optimizations --with-ensurepip=install \
+ && make -j"$(nproc)" && make install \
+ && cd / && rm -rf Python-${PYTHON_VERSION}*
 
-# STEP 3: Install the remaining application and system dependencies.
-# This layer will be rebuilt if you add or remove packages here, but Python won't be recompiled.
+# Step 2: App/system deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    aria2 \
-    megatools \
-    p7zip-full \
-    ffmpeg \
-    libmagic-dev \
+    aria2 megatools p7zip-full ffmpeg libmagic-dev \
     qbittorrent-nox=4.2.5-0.1 \
  && rm -rf /var/lib/apt/lists/*
 
-# Set the working directory
 WORKDIR /usr/src/app
 
-# STEP 4: Install Python dependencies.
-# This layer is cached and only re-runs if requirements.txt changes.
 COPY requirements.txt .
 RUN pip3 install --no-cache-dir -r requirements.txt
 
-# STEP 5: Copy the application code.
-# This is one of the last steps, so changes to your code won't trigger a full reinstall.
 COPY . .
-
-# Define the command to start the application using your script.
 CMD ["/bin/bash", "start.sh"]
