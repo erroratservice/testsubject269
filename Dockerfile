@@ -5,8 +5,8 @@ FROM debian:11-slim
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHON_VERSION=3.10.13
 
-# STEP 1: Install system dependencies and compile Python
-# This entire layer will be cached. It only re-runs if this command changes.
+# STEP 1: Install only the build dependencies required to compile Python.
+# This layer is highly stable and will likely never need to be rebuilt.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     build-essential \
@@ -22,14 +22,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     xz-utils \
     tk-dev \
     liblzma-dev \
-    aria2 \
-    megatools \
-    p7zip-full \
-    ffmpeg \
-    libmagic-dev \
-    qbittorrent-nox=4.2.5-0.1 \
- && rm -rf /var/lib/apt/lists/* \
- && wget "https://www.python.org/ftp/python/$PYTHON_VERSION/Python-$PYTHON_VERSION.tar.xz" \
+ && rm -rf /var/lib/apt/lists/*
+
+# STEP 2: Compile and install Python.
+# This layer is also very stable and will be cached.
+RUN wget "https://www.python.org/ftp/python/$PYTHON_VERSION/Python-$PYTHON_VERSION.tar.xz" \
     && tar -xvf "Python-$PYTHON_VERSION.tar.xz" \
     && cd "Python-$PYTHON_VERSION" \
     && ./configure --enable-optimizations --with-ensurepip=install \
@@ -37,17 +34,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && make install \
     && rm -rf /Python-$PYTHON_VERSION*
 
+# STEP 3: Install the remaining application and system dependencies.
+# This layer will be rebuilt if you add or remove packages here, but Python won't be recompiled.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    aria2 \
+    megatools \
+    p7zip-full \
+    ffmpeg \
+    libmagic-dev \
+    qbittorrent-nox=4.2.5-0.1 \
+ && rm -rf /var/lib/apt/lists/*
+
 # Set the working directory
 WORKDIR /usr/src/app
 
-# STEP 2: Install Python dependencies
-# This layer is cached and only re-runs if requirements.txt changes
+# STEP 4: Install Python dependencies.
+# This layer is cached and only re-runs if requirements.txt changes.
 COPY requirements.txt .
 RUN pip3 install --no-cache-dir -r requirements.txt
 
-# STEP 3: Copy the application code
-# This is one of the last steps, so changes to your code won't trigger a full reinstall
+# STEP 5: Copy the application code.
+# This is one of the last steps, so changes to your code won't trigger a full reinstall.
 COPY . .
 
-# Define the command to start the application using your script
+# Define the command to start the application using your script.
 CMD ["/bin/bash", "start.sh"]
