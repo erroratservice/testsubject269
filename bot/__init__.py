@@ -20,7 +20,6 @@ from pymongo.mongo_client import MongoClient
 from pymongo.server_api import ServerApi
 from pyrogram import Client as TgClient, enums
 from qbittorrentapi import Client as QbClient
-from sabnzbdapi import SabnzbdClient
 from socket import setdefaulttimeout
 from subprocess import Popen, run
 from time import time
@@ -57,8 +56,6 @@ load_dotenv("config.env", override=True)
 
 intervals = {"status": {}, "qb": "", "jd": "", "nzb": "", "stopAll": False}
 qb_torrents = {}
-jd_downloads = {}
-nzb_jobs = {}
 drives_names = []
 drives_ids = []
 index_urls = []
@@ -66,7 +63,6 @@ global_extension_filter = ["aria2", "!qB"]
 user_data = {}
 aria2_options = {}
 qbit_options = {}
-nzb_options = {}
 queued_dl = {}
 queued_up = {}
 non_queued_dl = set()
@@ -84,8 +80,6 @@ except:
 task_dict_lock = Lock()
 queue_dict_lock = Lock()
 qb_listener_lock = Lock()
-nzb_listener_lock = Lock()
-jd_lock = Lock()
 cpu_eater_lock = Lock()
 subprocess_lock = Lock()
 same_directory_lock = Lock()
@@ -138,14 +132,6 @@ if DATABASE_URL:
         if qbit_opt := db.settings.qbittorrent.find_one({"_id": BOT_ID}):
             del qbit_opt["_id"]
             qbit_options = qbit_opt
-        if nzb_opt := db.settings.nzb.find_one({"_id": BOT_ID}):
-            if ospath.exists("sabnzbd/SABnzbd.ini.bak"):
-                remove("sabnzbd/SABnzbd.ini.bak")
-            del nzb_opt["_id"]
-            ((key, value),) = nzb_opt.items()
-            file_ = key.replace("__", ".")
-            with open(f"sabnzbd/{file_}", "wb+") as f:
-                f.write(value)
         conn.close()
         BOT_TOKEN = environ.get("BOT_TOKEN", "")
         BOT_ID = BOT_TOKEN.split(":", 1)[0]
@@ -154,12 +140,6 @@ if DATABASE_URL:
         LOGGER.error(f"Database ERROR: {e}")
 else:
     config_dict = {}
-
-if ospath.exists("cfg.zip"):
-    if ospath.exists("/JDownloader/cfg"):
-        rmtree("/JDownloader/cfg", ignore_errors=True)
-    run(["7z", "x", "cfg.zip", "-o/JDownloader"])
-    remove("cfg.zip")
 
 if not ospath.exists(".netrc"):
     with open(".netrc", "w"):
@@ -258,24 +238,6 @@ if len(EXTENSION_FILTER) > 0:
     for x in fx:
         x = x.lstrip(".")
         global_extension_filter.append(x.strip().lower())
-
-JD_EMAIL = environ.get("JD_EMAIL", "")
-JD_PASS = environ.get("JD_PASS", "")
-if len(JD_EMAIL) == 0 or len(JD_PASS) == 0:
-    JD_EMAIL = ""
-    JD_PASS = ""
-
-USENET_SERVERS = environ.get("USENET_SERVERS", "")
-try:
-    if len(USENET_SERVERS) == 0:
-        USENET_SERVERS = []
-    elif (us := eval(USENET_SERVERS)) and not us[0].get("host"):
-        USENET_SERVERS = []
-    else:
-        USENET_SERVERS = eval(USENET_SERVERS)
-except:
-    log_error(f"Wrong USENET_SERVERS format: {USENET_SERVERS}")
-    USENET_SERVERS = []
 
 FILELION_API = environ.get("FILELION_API", "")
 if len(FILELION_API) == 0:
@@ -450,8 +412,6 @@ config_dict = {
     "INCOMPLETE_TASK_NOTIFIER": INCOMPLETE_TASK_NOTIFIER,
     "INDEX_URL": INDEX_URL,
     "IS_TEAM_DRIVE": IS_TEAM_DRIVE,
-    "JD_EMAIL": JD_EMAIL,
-    "JD_PASS": JD_PASS,
     "LEECH_DUMP_CHAT": LEECH_DUMP_CHAT,
     "LEECH_FILENAME_PREFIX": LEECH_FILENAME_PREFIX,
     "LEECH_SPLIT_SIZE": LEECH_SPLIT_SIZE,
@@ -485,7 +445,6 @@ config_dict = {
     "USER_TRANSMISSION": USER_TRANSMISSION,
     "UPSTREAM_REPO": UPSTREAM_REPO,
     "UPSTREAM_BRANCH": UPSTREAM_BRANCH,
-    "USENET_SERVERS": USENET_SERVERS,
     "USER_SESSION_STRING": USER_SESSION_STRING,
     "USE_SERVICE_ACCOUNTS": USE_SERVICE_ACCOUNTS,
     "WEB_PINCODE": WEB_PINCODE,
@@ -535,13 +494,6 @@ qbittorrent_client = QbClient(
         "pool_block": True,
     },
 )
-
-sabnzbd_client = SabnzbdClient(
-    host="http://localhost",
-    api_key="mltb",
-    port="8070",
-)
-
 
 aria2c_global = [
     "bt-max-open-files",
@@ -598,9 +550,4 @@ else:
     aria2.set_global_options(a2c_glo)
 
 
-async def get_nzb_options():
-    global nzb_options
-    nzb_options = (await sabnzbd_client.get_config())["config"]["misc"]
-
-
-bot_loop.run_until_complete(get_nzb_options())
+bot_loop.run_until_complete(get_qb_options())
