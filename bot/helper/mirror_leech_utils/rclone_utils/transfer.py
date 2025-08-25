@@ -440,11 +440,7 @@ class RcloneTransferHelper:
     ):
         if unwanted_files is None:
             unwanted_files = []
-        if source.split(":")[-1].startswith("rclone_select"):
-            source = f"{source.split(":")[0]}:"
-            self.rclone_select = True
-        else:
-            ext = "*.{" + ",".join(self._listener.extension_filter) + "}"
+
         cmd = [
             "rclone",
             method,
@@ -452,8 +448,20 @@ class RcloneTransferHelper:
             "--config",
             config_path,
             "-P",
-            source,
-            destination,
+        ]
+
+        if source.split(":")[-1].startswith("rclone_select"):
+            source = f"{source.split(':')[0]}:"
+            self.rclone_select = True
+            cmd.extend((source, destination))
+        else:
+            # This is the corrected and cleaner way to build the extension filter
+            extensions = ",".join(self._listener.extension_filter)
+            ext = f"*.{{{extensions}}}"
+            cmd.extend((source, destination))
+            cmd.extend(("--exclude", ext))
+
+        cmd.extend([
             "--retries-sleep",
             "3s",
             "--ignore-case",
@@ -464,11 +472,11 @@ class RcloneTransferHelper:
             "rlog.txt",
             "--log-level",
             "DEBUG",
-        ]
+        ])
+
         if self.rclone_select:
             cmd.extend(("--files-from", self._listener.link))
-        else:
-            cmd.extend(("--exclude", ext))
+
         if rcflags := self._listener.rc_flags or config_dict["RCLONE_FLAGS"]:
             rcflags = rcflags.split("|")
             for flag in rcflags:
@@ -477,10 +485,13 @@ class RcloneTransferHelper:
                     cmd.extend((key, value))
                 elif len(flag) > 0:
                     cmd.append(flag.strip())
+
         if unwanted_files:
             for f in unwanted_files:
                 cmd.extend(("--exclude", f.rsplit("/", 1)[1]))
+
         return cmd
+
 
     @staticmethod
     async def _get_remote_options(config_path, remote):
