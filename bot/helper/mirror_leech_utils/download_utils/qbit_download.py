@@ -1,5 +1,5 @@
 from aiofiles.os import remove, path as aiopath
-from asyncio import sleep
+from asyncio import sleep, create_task
 
 from bot import (
     task_dict,
@@ -176,7 +176,7 @@ async def add_qb_torrent(listener, path, ratio, seed_time):
 async def add_qb_torrent_ghostleech(listener, torrent_path, ratio, seed_time):
     """
     Ghostleech function - only accepts .torrent files
-    Similar to add_qb_torrent but specifically for .torrent file handling
+    Starts torrent and removes unwanted trackers (like the source repository)
     """
     try:
         # Validate input is .torrent file
@@ -203,13 +203,13 @@ async def add_qb_torrent_ghostleech(listener, torrent_path, ratio, seed_time):
 
         add_to_queue, event = await check_running_tasks(listener)
 
-        # Add .torrent file (ghostleech mode - paused initially)
+        # Add .torrent file (ghostleech mode - start normally, not paused)
         op = await sync_to_async(
             qbittorrent_client.torrents_add,
             None,  # no URL
             torrent_path,  # .torrent file path
             f"{listener.dir}/",  # save path
-            is_paused=True,  # Always start paused for ghostleech
+            is_paused=add_to_queue,  # Only pause if queue requires it
             tags=f"{listener.mid}",
             ratio_limit=ratio,
             seeding_time_limit=seed_time,
@@ -244,8 +244,49 @@ async def add_qb_torrent_ghostleech(listener, torrent_path, ratio, seed_time):
             )
         await on_download_start(ext_hash)
 
-        LOGGER.info(f"Ghostleech started (paused): {tor_info.name} - Hash: {ext_hash}")
+        LOGGER.info(f"Ghostleech started: {tor_info.name} - Hash: {ext_hash}")
         await listener.on_download_start()
+
+        # Ghostleech functionality: Remove unwanted trackers after starting
+        async def remove_bad_trackers():
+            try:
+                await sleep(2)  # Wait a bit for torrent to initialize
+                rmmsg = "<b>Removed These Trackers</b>\n"
+                isdone = False
+                
+                while not isdone:
+                    trackers = await sync_to_async(
+                        qbittorrent_client.torrents_trackers, torrent_hash=ext_hash
+                    )
+                    
+                    # Skip first 3 trackers (usually DHT, PEX, LSD)
+                    trackers = trackers[3:] if len(trackers) > 3 else []
+                    
+                    for tracker in trackers:
+                        # Remove trackers with status 2 (not working) or 3 (not contacted)
+                        if tracker.status == 2 or tracker.status == 3:
+                            LOGGER.info(f"Removing tracker {tracker.url} with status {tracker.status}")
+                            rmmsg += f"<code>{tracker.url}</code>\n"
+                            await sync_to_async(
+                                qbittorrent_client.torrents_remove_trackers,
+                                torrent_hash=ext_hash,
+                                urls=tracker.url
+                            )
+                            isdone = True
+                    
+                    await sleep(0.5)
+                    if isdone:
+                        break
+                
+                if rmmsg != "<b>Removed These Trackers</b>\n":
+                    await send_message(listener.message, rmmsg)
+                    LOGGER.info(f"Ghostleech completed tracker removal for {listener.name}")
+                
+            except Exception as e:
+                LOGGER.error(f"Ghostleech tracker removal failed: {e}")
+
+        # Start tracker removal in background
+        create_task(remove_bad_trackers())
 
         # Send status message
         if listener.multi <= 1:
