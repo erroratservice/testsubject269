@@ -1,15 +1,79 @@
 from PIL import Image
 from aiofiles.os import remove, path as aiopath, makedirs
-from asyncio import create_subprocess_exec, gather, wait_for
+from asyncio import create_subprocess_exec, gather, wait_for, subprocess
 from asyncio.subprocess import PIPE
 from os import path as ospath, cpu_count
 from re import search as re_search, escape
 from time import time
 from aioshutil import rmtree
+import json
 
 from bot import LOGGER, subprocess_lock, DOWNLOAD_DIR
 from .bot_utils import cmd_exec, sync_to_async
 from .files_utils import ARCH_EXT, get_mime_type
+
+# New function added to get detailed media info using ffprobe
+async def get_detailed_media_streams_info(file_path: str) -> dict:
+    streams_info = {
+        "video_streams": [],
+        "audio_streams": [],
+        "subtitle_streams": []
+    }
+    
+    try:
+        process = await create_subprocess_exec(
+            "ffprobe",
+            "-v", "quiet",
+            "-print_format", "json",
+            "-show_streams",
+            file_path,
+            stdout=PIPE,
+            stderr=PIPE
+        )
+        stdout, stderr = await process.communicate()
+        
+        if process.returncode != 0:
+            error_message = stderr.decode().strip()
+            LOGGER.error(f"ffprobe error for {file_path}: {error_message}")
+            return streams_info
+        
+        probe_data = json.loads(stdout.decode())
+        
+        if 'streams' in probe_data:
+            first_video_stream_taken = False
+            for stream in probe_data['streams']:
+                stream_type = stream.get('codec_type')
+                if stream_type == 'video' and not first_video_stream_taken:
+                    streams_info['video_streams'].append({
+                        'codec_name': stream.get('codec_name'),
+                        'height': stream.get('height'),
+                        'width': stream.get('width'),
+                        'profile': stream.get('profile'),
+                        'bit_rate': stream.get('bit_rate'),
+                        'display_aspect_ratio': stream.get('display_aspect_ratio'),
+                    })
+                    first_video_stream_taken = True
+                elif stream_type == 'audio':
+                    streams_info['audio_streams'].append({
+                        'codec_name': stream.get('codec_name'),
+                        'tags': stream.get('tags', {}),
+                        'channels': stream.get('channels'),
+                        'channel_layout': stream.get('channel_layout'),
+                        'bit_rate': stream.get('bit_rate'),
+                    })
+                elif stream_type == 'subtitle':
+                    streams_info['subtitle_streams'].append({
+                        'codec_name': stream.get('codec_name'),
+                        'tags': stream.get('tags', {}),
+                    })
+        return streams_info
+
+    except FileNotFoundError:
+        LOGGER.error("ffprobe command not found. Please install ffmpeg.")
+        return streams_info
+    except Exception as e:
+        LOGGER.error(f"Error getting detailed media info for {file_path}: {str(e)}")
+        return streams_info
 
 
 async def convert_video(listener, video_file, ext, retry=False):
@@ -505,7 +569,7 @@ async def split_file(
                     LOGGER.warning(
                         f"{stderr}. Unable to split this video, if it's size less than {listener.max_split_size} will be uploaded as it is. Path: {path}"
                     )
-                return False
+                    return False
             out_size = await aiopath.getsize(out_path)
             if out_size > listener.max_split_size:
                 dif = out_size - listener.max_split_size
@@ -643,6 +707,7 @@ async def create_sample_video(listener, video_file, sample_duration, part_durati
         if await aiopath.exists(output_file):
             await remove(output_file)
         return False
+
 
     """finished_segments = []
     await makedirs(f"{dir}/mltb_segments/", exist_ok=True)

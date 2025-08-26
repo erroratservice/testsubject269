@@ -6,7 +6,8 @@ from natsort import natsorted
 from os import walk, path as ospath
 from time import time
 from re import match as re_match, sub as re_sub
-from pyrogram.errors import FloodWait, RPCError
+from pyrogram.errors import FloodWait, RPCError, BadRequest
+from pyrogram.enums import ParseMode
 from aiofiles.os import (
     remove,
     path as aiopath,
@@ -36,6 +37,7 @@ from ..ext_utils.media_utils import (
     get_video_thumbnail,
     get_audio_thumbnail,
     get_multiple_frames_thumbnail,
+    get_detailed_media_streams_info, # <-- ADDED THIS LINE
 )
 
 LOGGER = getLogger(__name__)
@@ -353,7 +355,6 @@ class TelegramUploader:
         await self._listener.on_upload_complete(
             None, self._msgs_dict, self._total_files, self._corrupted
         )
-
     @retry(
         wait=wait_exponential(multiplier=2, min=4, max=8),
         stop=stop_after_attempt(3),
@@ -366,6 +367,43 @@ class TelegramUploader:
         self._is_corrupted = False
         try:
             is_video, is_audio, is_image = await get_document_type(self._up_path)
+
+            final_caption_to_send = cap_mono
+            # --- START: New MediaInfo Logic ---
+            if is_video or is_audio:
+                try:
+                    streams_info = await get_detailed_media_streams_info(self._up_path)
+                    media_info_parts_to_add = []
+                    
+                    video_info_display_string = None
+                    if is_video and streams_info.get("video_streams"):
+                        vs = streams_info["video_streams"][0]
+                        v_codec = vs.get("codec_name", "N/A").upper()
+                        v_height = vs.get("height")
+                        quality = f"{v_height}p" if v_height else ""
+                        info_str = f"{v_codec} {quality}".strip()
+                        if info_str and info_str.lower() != "n/a":
+                            media_info_parts_to_add.append(f"Video: {info_str}")
+
+                    audio_data = streams_info.get("audio_streams", [])
+                    has_any_defined_audio_language = False
+                    if audio_data:
+                        all_lang_tags = [s.get("tags", {}).get("language", "und").upper()[:3] for s in audio_data]
+                        if any(lang != "UND" for lang in all_lang_tags):
+                            has_any_defined_audio_language = True
+                        
+                        if has_any_defined_audio_language:
+                            defined_langs = sorted(list(set(lang for lang in all_lang_tags if lang != "UND")))
+                            langs_str = ", ".join(defined_langs)
+                            media_info_parts_to_add.append(f"Audio: {len(audio_data)} ({langs_str})")
+                    
+                    if media_info_parts_to_add:
+                        media_info_string = "\n\n" + "\n".join(media_info_parts_to_add)
+                        final_caption_to_send = f"{final_caption_to_send}{media_info_string}"
+                        
+                except Exception as e_media_info:
+                    LOGGER.warning(f"Could not get/format detailed media info for {self._up_path}: {e_media_info}")
+            # --- END: New MediaInfo Logic ---
 
             if not is_image and thumb is None:
                 file_name = ospath.splitext(file)[0]
@@ -390,10 +428,11 @@ class TelegramUploader:
                     document=self._up_path,
                     quote=True,
                     thumb=thumb,
-                    caption=cap_mono,
+                    caption=final_caption_to_send,
                     force_document=True,
                     disable_notification=True,
                     progress=self._upload_progress,
+                    parse_mode=ParseMode.HTML, # Added this to respect markdown in caption
                 )
             elif is_video:
                 key = "videos"
@@ -417,7 +456,7 @@ class TelegramUploader:
                 self._sent_msg = await self._sent_msg.reply_video(
                     video=self._up_path,
                     quote=True,
-                    caption=cap_mono,
+                    caption=final_caption_to_send,
                     duration=duration,
                     width=width,
                     height=height,
@@ -425,6 +464,7 @@ class TelegramUploader:
                     supports_streaming=True,
                     disable_notification=True,
                     progress=self._upload_progress,
+                    parse_mode=ParseMode.HTML, # Added this to respect markdown in caption
                 )
             elif is_audio:
                 key = "audios"
@@ -434,13 +474,14 @@ class TelegramUploader:
                 self._sent_msg = await self._sent_msg.reply_audio(
                     audio=self._up_path,
                     quote=True,
-                    caption=cap_mono,
+                    caption=final_caption_to_send,
                     duration=duration,
                     performer=artist,
                     title=title,
                     thumb=thumb,
                     disable_notification=True,
                     progress=self._upload_progress,
+                    parse_mode=ParseMode.HTML, # Added this to respect markdown in caption
                 )
             else:
                 key = "photos"
@@ -449,9 +490,10 @@ class TelegramUploader:
                 self._sent_msg = await self._sent_msg.reply_photo(
                     photo=self._up_path,
                     quote=True,
-                    caption=cap_mono,
+                    caption=final_caption_to_send,
                     disable_notification=True,
                     progress=self._upload_progress,
+                    parse_mode=ParseMode.HTML, # Added this to respect markdown in caption
                 )
 
             if (
