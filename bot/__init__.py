@@ -518,7 +518,6 @@ bot = TgClient(
     TELEGRAM_HASH,
     bot_token=BOT_TOKEN,
     parse_mode=enums.ParseMode.HTML,
-    max_concurrent_transmissions=10,
 ).start()
 bot_name = bot.me.username
 
