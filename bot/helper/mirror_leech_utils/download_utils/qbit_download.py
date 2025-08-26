@@ -171,3 +171,104 @@ async def add_qb_torrent(listener, path, ratio, seed_time):
     finally:
         if tpath and await aiopath.exists(tpath):
             await remove(tpath)
+
+
+async def add_qb_torrent_ghostleech(listener, torrent_path, ratio, seed_time):
+    """
+    Ghostleech function - only accepts .torrent files
+    Similar to add_qb_torrent but specifically for .torrent file handling
+    """
+    try:
+        # Validate input is .torrent file
+        if not await aiopath.exists(torrent_path) or not torrent_path.endswith('.torrent'):
+            await listener.on_download_error("Ghostleech only supports .torrent files")
+            return
+
+        # Get hash from .torrent file for duplicate check and tracking
+        ext_hash = get_hash_file(torrent_path)
+        if not ext_hash:
+            await listener.on_download_error("Invalid .torrent file for ghostleech")
+            return
+
+        # Check for duplicates
+        try:
+            existing = await sync_to_async(
+                qbittorrent_client.torrents_info, torrent_hashes=ext_hash
+            )
+            if existing:
+                await listener.on_download_error("This Torrent already added.")
+                return
+        except Exception:
+            pass  # non-fatal; proceed to add
+
+        add_to_queue, event = await check_running_tasks(listener)
+
+        # Add .torrent file (ghostleech mode - paused initially)
+        op = await sync_to_async(
+            qbittorrent_client.torrents_add,
+            None,  # no URL
+            torrent_path,  # .torrent file path
+            f"{listener.dir}/",  # save path
+            is_paused=True,  # Always start paused for ghostleech
+            tags=f"{listener.mid}",
+            ratio_limit=ratio,
+            seeding_time_limit=seed_time,
+        )
+        
+        if not isinstance(op, str) or op.lower() != "ok.":
+            await listener.on_download_error("Failed to add torrent in ghostleech mode")
+            return
+
+        # Poll by hash until visible (ghostleech pattern)
+        tor_info = None
+        for _ in range(15):
+            lst = await sync_to_async(
+                qbittorrent_client.torrents_info, torrent_hashes=ext_hash
+            )
+            if lst:
+                tor_info = lst[0]
+                break
+            await sleep(1)
+
+        if not tor_info:
+            await listener.on_download_error("Ghostleech torrent was added but could not be retrieved")
+            return
+
+        listener.name = tor_info.name
+        ext_hash = tor_info.hash
+
+        # Register status and start hash-based tracking
+        async with task_dict_lock:
+            task_dict[listener.mid] = QbittorrentStatus(
+                listener, queued=add_to_queue, torrent_hash=ext_hash
+            )
+        await on_download_start(ext_hash)
+
+        LOGGER.info(f"Ghostleech started (paused): {tor_info.name} - Hash: {ext_hash}")
+        await listener.on_download_start()
+
+        # Send status message
+        if listener.multi <= 1:
+            await send_status_message(listener.message)
+
+        # Handle queue release and resume
+        if event is not None:
+            if not event.is_set():
+                await event.wait()
+                if listener.is_cancelled:
+                    return
+                async with task_dict_lock:
+                    task_dict[listener.mid].queued = False
+                LOGGER.info(f"Start Queued Ghostleech: {tor_info.name} - Hash: {ext_hash}")
+            
+            # Resume the torrent after queue release
+            await sync_to_async(
+                qbittorrent_client.torrents_resume, torrent_hashes=ext_hash
+            )
+
+    except Exception as e:
+        await listener.on_download_error(f"Ghostleech error: {e}")
+    finally:
+        # Clean up .torrent file
+        if torrent_path and await aiopath.exists(torrent_path):
+            await remove(torrent_path)
