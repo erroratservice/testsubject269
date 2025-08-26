@@ -28,6 +28,7 @@ requests
 telegraph
 tenacity
 tgcrypto
+torrentool
 urllib3
 uvloop
 xattr
