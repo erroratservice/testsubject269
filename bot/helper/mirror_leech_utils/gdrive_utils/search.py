@@ -140,7 +140,7 @@ class GoogleDriveSearch(GoogleDriveHelper):
                 mime_type = file.get("mimeType")
                 if mime_type == self.G_DRIVE_DIR_MIME_TYPE:
                     furl = self.G_DRIVE_DIR_BASE_DOWNLOAD_URL.format(file.get("id"))
-                    msg += f"📁 <code>{file.get('name')}<br>(folder)</code><br>"
+                    msg += f"<code>{file.get('name')}<br>(folder)</code><br>"
                     msg += f"<b><a href={furl}>Drive Link</a></b>"
                     if index_url:
                         url = f'{index_url}findpath?id={file.get("id")}'
@@ -153,7 +153,7 @@ class GoogleDriveSearch(GoogleDriveHelper):
                     )
                 else:
                     furl = self.G_DRIVE_BASE_DOWNLOAD_URL.format(file.get("id"))
-                    msg += f"📄 <code>{file.get('name')}<br>({get_readable_file_size(int(file.get('size', 0)))})</code><br>"
+                    msg += f"<code>{file.get('name')}<br>({get_readable_file_size(int(file.get('size', 0)))})</code><br>"
                     msg += f"<b><a href={furl}>Drive Link</a></b>"
                     if index_url:
                         url = f'{index_url}findpath?id={file.get("id")}'

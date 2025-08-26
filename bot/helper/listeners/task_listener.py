@@ -315,7 +315,7 @@ class TaskListener(TaskConfig):
             ):
                 buttons = ButtonMaker()
                 if link:
-                    buttons.url_button("☁️ Cloud Link", link)
+                    buttons.url_button("Cloud Link", link)
                 else:
                     msg += f"\n\nPath: <code>{rclone_path}</code>"
                 if (
@@ -328,7 +328,7 @@ class TaskListener(TaskConfig):
                     share_url = f"{RCLONE_SERVE_URL}/{remote}/{url_path}"
                     if mime_type == "Folder":
                         share_url += "/"
-                    buttons.url_button("🔗 Rclone Link", share_url)
+                    buttons.url_button("Rclone Link", share_url)
                 if not rclone_path and dir_id:
                     INDEX_URL = ""
                     if self.private_link:
@@ -337,15 +337,14 @@ class TaskListener(TaskConfig):
                         INDEX_URL = config_dict["INDEX_URL"]
                     if INDEX_URL:
                         share_url = f"{INDEX_URL}findpath?id={dir_id}"
-                        buttons.url_button("⚡ Index Link", share_url)
+                        buttons.url_button("Index Link", share_url)
                         if mime_type.startswith(("image", "video", "audio")):
                             share_urls = f"{INDEX_URL}findpath?id={dir_id}&view=true"
-                            buttons.url_button("🌐 View Link", share_urls)
+                            buttons.url_button("View Link", share_urls)
                 button = buttons.build_menu(2)
             else:
                 msg += f"\n\nPath: <code>{rclone_path}</code>"
                 button = None
-            msg += f"\n\n<b>cc: </b>{self.tag}"
             await send_message(self.message, msg, button)
         if self.seed:
             if self.new_dir:
