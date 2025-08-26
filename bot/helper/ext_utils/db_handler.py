@@ -30,7 +30,7 @@ class DbManager:
                 self._conn = AsyncIOMotorClient(
                     config_dict["DATABASE_URL"], server_api=ServerApi("1")
                 )
-                self._db = self._conn.mltb
+                self._db = self._conn.ghost
                 self._return = False
             else:
                 self._return = True

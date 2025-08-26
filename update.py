@@ -53,7 +53,7 @@ if len(DATABASE_URL) == 0:
 if DATABASE_URL is not None:
     try:
         conn = MongoClient(DATABASE_URL, server_api=ServerApi("1"))
-        db = conn.mltb
+        db = conn.ghost
         old_config = db.settings.deployConfig.find_one({"_id": BOT_ID})
         config_dict = db.settings.config.find_one({"_id": BOT_ID})
         if old_config is not None:

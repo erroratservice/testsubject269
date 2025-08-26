@@ -102,7 +102,7 @@ if len(DATABASE_URL) == 0:
 if DATABASE_URL:
     try:
         conn = MongoClient(DATABASE_URL, server_api=ServerApi("1"))
-        db = conn.mltb
+        db = conn.ghost
         current_config = dict(dotenv_values("config.env"))
         old_config = db.settings.deployConfig.find_one({"_id": BOT_ID})
         if old_config is None:
@@ -531,9 +531,9 @@ def get_qb_options():
         for k in list(qbit_options.keys()):
             if k.startswith("rss"):
                 del qbit_options[k]
-        qbittorrent_client.app_set_preferences({"web_ui_password": "mltbmltb"})
+        qbittorrent_client.app_set_preferences({"web_ui_password": "adminadmin"})
     else:
-        qbit_options["web_ui_password"] = "mltbmltb"
+        qbit_options["web_ui_password"] = "adminadmin"
         qb_opt = {**qbit_options}
         qbittorrent_client.app_set_preferences(qb_opt)
 
