@@ -31,7 +31,10 @@ from ..helper.mirror_leech_utils.download_utils.direct_link_generator import (
     direct_link_generator,
 )
 from ..helper.mirror_leech_utils.download_utils.gd_download import add_gd_download
-from ..helper.mirror_leech_utils.download_utils.qbit_download import add_qb_torrent
+from ..helper.mirror_leech_utils.download_utils.qbit_download import (
+    add_qb_torrent,
+    add_qb_torrent_ghostleech,  # NEW: Import ghostleech function
+)
 from ..helper.mirror_leech_utils.download_utils.rclone_download import (
     add_rclone_download,
 )
@@ -328,7 +331,11 @@ class Mirror(TaskListener):
         elif isinstance(self.link, dict):
             await add_direct_download(self, path)
         elif self.is_qbit:
-            await add_qb_torrent(self, path, ratio, seed_time)
+            # NEW: Check if it's a .torrent file for ghostleech
+            if isinstance(self.link, str) and self.link.endswith('.torrent'):
+                await add_qb_torrent_ghostleech(self, self.link, ratio, seed_time)
+            else:
+                await add_qb_torrent(self, path, ratio, seed_time)
         elif is_rclone_path(self.link):
             await add_rclone_download(self, f"{path}/")
         elif is_gdrive_link(self.link) or is_gdrive_id(self.link):
