@@ -224,7 +224,7 @@ class TelegramUploader:
                 )
         msgs_list = await msgs[0].reply_to_message.reply_media_group(
             media=self._get_input_media(subkey, key),
-            quote=True,
+            quote=False,
             disable_notification=True,
         )
         for msg in msgs:
@@ -426,7 +426,7 @@ class TelegramUploader:
                     return
                 self._sent_msg = await self._sent_msg.reply_document(
                     document=self._up_path,
-                    quote=True,
+                    quote=False,
                     thumb=thumb,
                     caption=final_caption_to_send,
                     force_document=True,
@@ -455,7 +455,7 @@ class TelegramUploader:
                     return
                 self._sent_msg = await self._sent_msg.reply_video(
                     video=self._up_path,
-                    quote=True,
+                    quote=False,
                     caption=final_caption_to_send,
                     duration=duration,
                     width=width,
@@ -473,7 +473,7 @@ class TelegramUploader:
                     return
                 self._sent_msg = await self._sent_msg.reply_audio(
                     audio=self._up_path,
-                    quote=True,
+                    quote=False,
                     caption=final_caption_to_send,
                     duration=duration,
                     performer=artist,
@@ -489,7 +489,7 @@ class TelegramUploader:
                     return
                 self._sent_msg = await self._sent_msg.reply_photo(
                     photo=self._up_path,
-                    quote=True,
+                    quote=False,
                     caption=final_caption_to_send,
                     disable_notification=True,
                     progress=self._upload_progress,
