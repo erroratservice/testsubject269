@@ -1,5 +1,5 @@
 import time
-from bot.helper.ext_utils.bot_utils import MirrorStatus, get_readable_time, get_readable_file_size
+from bot.helper.ext_utils.bot_utils import MirrorStatus, get_readable_time
 
 class ScanStatus:
     def __init__(self, message, total, processed, start_time):
@@ -36,11 +36,9 @@ class ScanStatus:
         return f"{self.__processed} of {self.__total}"
 
     def eta(self):
-        if self.progress_raw() > 0:
+        if self.__processed > 0:
             elapsed_time = time.time() - self.__start_time
             remaining_messages = self.__total - self.__processed
-            if self.__processed == 0:
-                return '-'
             seconds_per_message = elapsed_time / self.__processed
             eta_seconds = remaining_messages * seconds_per_message
             return get_readable_time(eta_seconds)
@@ -50,18 +48,16 @@ class ScanStatus:
         return MirrorStatus.STATUS_DOWNLOADING # Using downloading status for visual representation
 
     def processed_bytes(self):
-        # We can use this to represent processed messages for the progress bar
         return self.__processed
 
     def total_bytes(self):
-        # We can use this to represent total messages for the progress bar
         return self.__total
         
     def message(self):
         return self.__message
         
-    def cancel(self):
-        self.is_cancelled = True
+    def start_time(self):
+        return self.__start_time
 
     @property
     def processed(self):
