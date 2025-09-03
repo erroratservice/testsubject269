@@ -58,16 +58,16 @@ from .modules import (
     bot_settings,
     help,
     force_start,
-    # NEW IMPORTS
     channel_leech,
     channel_commands,
 )
+
 
 @new_task
 async def stats(_, message):
     if await aiopath.exists(".git"):
         last_commit = await cmd_exec(
-            "git log -1 --date=short --pretty=format:'%cd From %cr'", True
+            "git log -1 --date=short --pretty=format:'%cd <b>From</b> %cr'", True
         )
         last_commit = last_commit[0]
     else:
@@ -76,24 +76,25 @@ async def stats(_, message):
     swap = swap_memory()
     memory = virtual_memory()
     stats = (
-        f"Commit Date: {last_commit}\n\n"
-        f"Bot Uptime: {get_readable_time(time() - bot_start_time)}\n"
-        f"OS Uptime: {get_readable_time(time() - boot_time())}\n\n"
-        f"Total Disk Space: {get_readable_file_size(total)}\n"
-        f"Used: {get_readable_file_size(used)} | Free: {get_readable_file_size(free)}\n\n"
-        f"Upload: {get_readable_file_size(net_io_counters().bytes_sent)}\n"
-        f"Download: {get_readable_file_size(net_io_counters().bytes_recv)}\n\n"
-        f"CPU: {cpu_percent(interval=0.5)}%\n"
-        f"RAM: {memory.percent}%\n"
-        f"DISK: {disk}%\n\n"
-        f"Physical Cores: {cpu_count(logical=False)}\n"
-        f"Total Cores: {cpu_count(logical=True)}\n\n"
-        f"SWAP: {get_readable_file_size(swap.total)} | Used: {swap.percent}%\n"
-        f"Memory Total: {get_readable_file_size(memory.total)}\n"
-        f"Memory Free: {get_readable_file_size(memory.available)}\n"
-        f"Memory Used: {get_readable_file_size(memory.used)}\n"
+        f"<b>Commit Date:</b> {last_commit}\n\n"
+        f"<b>Bot Uptime:</b> {get_readable_time(time() - bot_start_time)}\n"
+        f"<b>OS Uptime:</b> {get_readable_time(time() - boot_time())}\n\n"
+        f"<b>Total Disk Space:</b> {get_readable_file_size(total)}\n"
+        f"<b>Used:</b> {get_readable_file_size(used)} | <b>Free:</b> {get_readable_file_size(free)}\n\n"
+        f"<b>Upload:</b> {get_readable_file_size(net_io_counters().bytes_sent)}\n"
+        f"<b>Download:</b> {get_readable_file_size(net_io_counters().bytes_recv)}\n\n"
+        f"<b>CPU:</b> {cpu_percent(interval=0.5)}%\n"
+        f"<b>RAM:</b> {memory.percent}%\n"
+        f"<b>DISK:</b> {disk}%\n\n"
+        f"<b>Physical Cores:</b> {cpu_count(logical=False)}\n"
+        f"<b>Total Cores:</b> {cpu_count(logical=True)}\n\n"
+        f"<b>SWAP:</b> {get_readable_file_size(swap.total)} | <b>Used:</b> {swap.percent}%\n"
+        f"<b>Memory Total:</b> {get_readable_file_size(memory.total)}\n"
+        f"<b>Memory Free:</b> {get_readable_file_size(memory.available)}\n"
+        f"<b>Memory Used:</b> {get_readable_file_size(memory.used)}\n"
     )
     await send_message(message, stats)
+
 
 @new_task
 async def start(client, message):
@@ -115,6 +116,7 @@ Type /{BotCommands.HelpCommand} to get a list of available commands
             "You Are not authorized user! Deploy your own mirror-leech bot",
             reply_markup,
         )
+
 
 @new_task
 async def restart(_, message):
@@ -140,6 +142,7 @@ async def restart(_, message):
         await f.write(f"{restart_message.chat.id}\n{restart_message.id}\n")
     osexecl(executable, executable, "-m", "bot")
 
+
 @new_task
 async def ping(_, message):
     start_time = int(round(time() * 1000))
@@ -147,9 +150,11 @@ async def ping(_, message):
     end_time = int(round(time() * 1000))
     await edit_message(reply, f"{end_time - start_time} ms")
 
+
 @new_task
 async def log(_, message):
     await send_file(message, "log.txt")
+
 
 help_string = f"""
 NOTE: Try each command without any argument to see more detalis.
@@ -185,14 +190,13 @@ NOTE: Try each command without any argument to see more detalis.
 /{BotCommands.ExecCommand}: Exec sync functions (Only Owner).
 /{BotCommands.ClearLocalsCommand}: Clear {BotCommands.AExecCommand} or {BotCommands.ExecCommand} locals (Only Owner).
 /{BotCommands.RssCommand}: RSS Menu.
-/{BotCommands.ChannelScanCommand}: Scan channel and build file database.
-/{BotCommands.ChannelLeechCommand}: Leech files from channels with duplicate detection.
-/{BotCommands.ChannelStatusCommand}: Show channel operation status.
 """
+
 
 @new_task
 async def bot_help(_, message):
     await send_message(message, help_string)
+
 
 async def restart_notification():
     if await aiopath.isfile(".restartmsg"):
@@ -225,7 +229,7 @@ async def restart_notification():
                 for tag, links in data.items():
                     msg += f"\n\n{tag}: "
                     for index, link in enumerate(links, start=1):
-                        msg += f" {index} |"
+                        msg += f" <a href='{link}'>{index}</a> |"
                         if len(msg.encode()) > 4000:
                             await send_incomplete_task_message(cid, msg)
                             msg = ""
@@ -241,13 +245,13 @@ async def restart_notification():
             pass
         await remove(".restartmsg")
 
+
 async def main():
     if config_dict["DATABASE_URL"]:
         await database.db_load()
-
     await gather(
         sync_to_async(clean_all),
-        torrent_search.initiate_search_tools(),
+        bot_settings.initiate_search_tools(),
         restart_notification(),
         telegraph.create_account(),
         rclone_serve_booter(),
@@ -295,9 +299,9 @@ async def main():
             & CustomFilters.authorized,
         )
     )
-
     LOGGER.info("Bot Started!")
     signal(SIGINT, exit_clean_up)
+
 
 bot.loop.run_until_complete(main())
 bot.loop.run_forever()
