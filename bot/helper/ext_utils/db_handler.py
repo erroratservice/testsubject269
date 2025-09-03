@@ -4,6 +4,8 @@ from dotenv import dotenv_values
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo.server_api import ServerApi
 from pymongo.errors import PyMongoError
+from datetime import datetime
+
 
 from bot import (
     user_data,
@@ -232,6 +234,68 @@ class DbManager:
         if self._return:
             return
         await self._db[name][BOT_ID].drop()
+
+    async def add_file_entry(self, channel_id, message_id, file_data):
+        """Add file entry to catalog"""
+        try:
+            document = {
+                "channel_id": str(channel_id),
+                "message_id": message_id,
+                "file_unique_id": file_data.get("file_unique_id"),
+                "file_name": file_data.get("file_name"),
+                "caption_first_line": file_data.get("caption_first_line", ""),
+                "file_size": file_data.get("file_size", 0),
+                "mime_type": file_data.get("mime_type", ""),
+                "file_hash": file_data.get("file_hash"),
+                "search_text": file_data.get("search_text", ""),
+                "date_added": file_data.get("date"),
+                "indexed_at": datetime.utcnow()
+            }
+            await self.db.file_catalog.insert_one(document)
+        except PyMongoError as e:
+            LOGGER.error(f"Error adding file entry: {e}")
+
+    async def check_file_exists(self, file_unique_id=None, file_hash=None, file_name=None):
+        """Check if file exists in catalog"""
+        try:
+            query = {}
+            if file_unique_id:
+                query["file_unique_id"] = file_unique_id
+            elif file_hash:
+                query["file_hash"] = file_hash
+            elif file_name:
+                query["$or"] = [
+                    {"file_name": {"$regex": file_name, "$options": "i"}},
+                    {"caption_first_line": {"$regex": file_name, "$options": "i"}}
+                ]
+            result = await self.db.file_catalog.find_one(query)
+            return result is not None
+        except PyMongoError as e:
+            LOGGER.error(f"Error checking file exists: {e}")
+            return False
+
+    async def get_catalog_stats(self, channel_id=None):
+        """Get file catalog statistics"""
+        try:
+            query = {}
+            if channel_id:
+                query["channel_id"] = str(channel_id)
+                
+            total_files = await self.db.file_catalog.count_documents(query)
+            
+            if channel_id:
+                return {"channel_id": channel_id, "total_files": total_files}
+            else:
+                pipeline = [
+                    {"$group": {"_id": "$channel_id", "count": {"$sum": 1}}},
+                    {"$sort": {"count": -1}}
+                ]
+                channel_stats = await self.db.file_catalog.aggregate(pipeline).to_list(None)
+                return {"total_files": total_files, "by_channel": channel_stats}
+                
+        except PyMongoError as e:
+            LOGGER.error(f"Error getting catalog stats: {e}")
+            return {}
 
 
 database = DbManager()
