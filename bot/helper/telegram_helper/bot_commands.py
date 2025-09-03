@@ -37,6 +37,9 @@ class _BotCommands:
         self.UserSetCommand = [f"usetting{CMD_SUFFIX}", f"us{CMD_SUFFIX}"]
         self.SelectCommand = f"sel{CMD_SUFFIX}"
         self.RssCommand = f"rss{CMD_SUFFIX}"
+        self.ChannelScanCommand = f'scan{CMD_SUFFIX}'
+        self.ChannelLeechCommand = f'cleech{CMD_SUFFIX}'
+        self.ChannelStatusCommand = f'cstatus{CMD_SUFFIX}'
 
 
 BotCommands = _BotCommands()
