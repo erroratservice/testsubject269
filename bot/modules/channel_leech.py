@@ -14,7 +14,7 @@ from ..helper.listeners.task_listener import TaskListener
 import asyncio
 import os
 import re
-from aiopath import path as aiopath
+from aiofiles.os import path as aiopath, remove, makedirs
 
 def remove_emoji(text):
     """Remove emojis and special characters from text"""
@@ -110,7 +110,7 @@ class ChannelLeech(TaskListener):
         file_path = f"{self.dir}/{name}"
         if await aiopath.exists(file_path):
             try:
-                await aiopath.remove(file_path)
+                await remove(file_path)
             except Exception as e:
                 LOGGER.error(f"Failed to clean up file {file_path}: {e}")
 
@@ -238,7 +238,7 @@ class ChannelLeech(TaskListener):
                         final_filename += original_extension
                     new_caption = os.path.splitext(final_filename)[0]
 
-        await aiopath.Path(self.dir).mkdir(parents=True, exist_ok=True)
+        await makedirs(self.dir, exist_ok=True)
         
         self.name = final_filename
         self.caption = new_caption
