@@ -1,7 +1,7 @@
 from pyrogram.filters import command
 from pyrogram.handlers import MessageHandler
 from pyrogram.errors import FloodWait
-from bot import bot, user, DOWNLOAD_DIR, LOGGER, user_data, config_dict
+from bot import bot, user, DOWNLOAD_DIR, LOGGER, user_data
 from ..helper.ext_utils.bot_utils import new_task
 from ..helper.ext_utils.db_handler import database
 from ..helper.telegram_helper.message_utils import send_message, edit_message
@@ -44,6 +44,10 @@ def sanitize_filename(filename):
     return filename
 
 class ChannelLeech(TaskListener):
+    # Default settings are now defined here instead of config.env
+    CONCURRENCY = 4
+    UPLOAD_DELAY = 2
+
     def __init__(self, client, message):
         # Set attributes BEFORE calling super().__init__()
         self.client = client
@@ -53,6 +57,11 @@ class ChannelLeech(TaskListener):
         self.status_message = None
         self.operation_key = None
         self.use_caption_as_filename = True
+        self.lock = asyncio.Lock()
+        self.processed = 0
+        self.downloaded = 0
+        self.skipped = 0
+        self.errors = 0
         
         # Critical: Set is_leech BEFORE calling super().__init__()
         self.is_leech = True
@@ -72,6 +81,7 @@ class ChannelLeech(TaskListener):
 
     def _apply_user_settings_with_fallbacks(self):
         """Apply user settings using the same three-tier fallback system as usersetting.py"""
+        from bot import config_dict # Import here to avoid circular import issues at top level
         user_dict = getattr(self, 'user_dict', {})
         
         LOGGER.info("=== APPLYING USER SETTINGS WITH FALLBACKS ===")
@@ -138,6 +148,14 @@ class ChannelLeech(TaskListener):
         
         LOGGER.info("=== USER SETTINGS APPLIED WITH FALLBACKS ===")
 
+    async def onDownloadComplete(self):
+        """Called when a download is complete, before the upload starts."""
+        if self.UPLOAD_DELAY > 0:
+            LOGGER.info(f"Channel Leech: Download complete. Waiting for {self.UPLOAD_DELAY}s before starting upload.")
+            await asyncio.sleep(self.UPLOAD_DELAY)
+        # Call the original onDownloadComplete method from the parent class to start the upload
+        await super().onDownloadComplete()
+
     async def new_event(self):
         """Main channel leech event handler"""
         text = self.message.text.split()
@@ -193,16 +211,32 @@ class ChannelLeech(TaskListener):
         finally:
             if self.operation_key:
                 await channel_status.stop_operation(self.operation_key)
+    
+    async def _worker(self, message, file_info, semaphore):
+        """Worker task to download a single file, respecting the semaphore."""
+        async with semaphore:
+            if self.is_cancelled:
+                return
+
+            try:
+                await self._download_file_tasklistener_pipeline(message, file_info)
+                
+                async with self.lock:
+                    self.downloaded += 1
+                await channel_status.update_operation(self.operation_key, downloaded=self.downloaded)
+                
+                await database.add_file_entry(self.channel_id, message.id, file_info)
+
+            except Exception as e:
+                async with self.lock:
+                    self.errors += 1
+                await channel_status.update_operation(self.operation_key, errors=self.errors)
+                LOGGER.error(f"Leech failed for {file_info['file_name']}: {e}")
 
     async def _process_channel(self):
-        """Process channel messages and download files for automatic upload"""
-        downloaded = 0
-        skipped = 0
-        processed = 0
-        errors = 0
-        batch_count = 0
-        batch_sleep = 3
-        message_sleep = 0.1
+        """Process channel messages and download files concurrently."""
+        tasks = []
+        semaphore = asyncio.Semaphore(self.CONCURRENCY)
 
         try:
             chat = await user.get_chat(self.channel_id)
@@ -211,7 +245,7 @@ class ChannelLeech(TaskListener):
             await edit_message(
                 self.status_message, 
                 f"Processing channel: **{chat.title}**\n"
-                f"Scanning messages...\n"
+                f"Scanning messages with **{self.CONCURRENCY}** concurrent downloads...\n"
                 f"Upload: **Clean Filename System** {caption_info}"
             )
 
@@ -222,12 +256,8 @@ class ChannelLeech(TaskListener):
                     LOGGER.info("Channel leech cancelled by user")
                     break
 
-                processed += 1
-                batch_count += 1
-
-                await channel_status.update_operation(
-                    self.operation_key, processed=processed
-                )
+                self.processed += 1
+                await channel_status.update_operation(self.operation_key, processed=self.processed)
 
                 file_info = await scanner._extract_file_info(message)
                 if not file_info:
@@ -245,56 +275,24 @@ class ChannelLeech(TaskListener):
                 )
 
                 if exists:
-                    skipped += 1
-                    await channel_status.update_operation(
-                        self.operation_key, skipped=skipped
-                    )
+                    self.skipped += 1
+                    await channel_status.update_operation(self.operation_key, skipped=self.skipped)
                     continue
 
-                try:
-                    await self._download_file_tasklistener_pipeline(message, file_info)
-                    downloaded += 1
+                task = asyncio.create_task(self._worker(message, file_info, semaphore))
+                tasks.append(task)
 
-                    await database.add_file_entry(
-                        self.channel_id, message.id, file_info
-                    )
-
-                    await channel_status.update_operation(
-                        self.operation_key, downloaded=downloaded
-                    )
-
-                except Exception as e:
-                    errors += 1
-                    LOGGER.error(f"Leech failed for {file_info['file_name']}: {e}")
-                    await channel_status.update_operation(
-                        self.operation_key, errors=errors
-                    )
-
-                await asyncio.sleep(message_sleep)
-
-                if batch_count >= 20:
-                    status_text = (
-                        f"**Progress Update**\n"
-                        f"Processed: {processed}\n"
-                        f"Downloaded: {downloaded}\n"
-                        f"Skipped: {skipped}\n"
-                        f"Errors: {errors}\n"
-                        f"Using: Clean Filename System"
-                    )
-                    await edit_message(self.status_message, status_text)
-                    
-                    LOGGER.info(f"Batch completed ({batch_count} messages), sleeping for {batch_sleep}s")
-                    await asyncio.sleep(batch_sleep)
-                    batch_count = 0
+            if tasks:
+                await asyncio.gather(*tasks)
 
             final_text = (
                 f"**Channel leech completed!**\n\n"
-                f"**Total processed:** {processed}\n"
-                f"**Downloaded:** {downloaded}\n"
-                f"**Skipped (duplicates):** {skipped}\n"
-                f"**Errors:** {errors}\n\n"
+                f"**Total processed:** {self.processed}\n"
+                f"**Downloaded:** {self.downloaded}\n"
+                f"**Skipped (duplicates):** {self.skipped}\n"
+                f"**Errors:** {self.errors}\n\n"
                 f"**Channel:** `{self.channel_id}`\n"
-                f"**System:** Clean Filenames Applied"
+                f"**System:** Concurrent Clean Filenames"
             )
             await edit_message(self.status_message, final_text)
 
@@ -313,7 +311,6 @@ class ChannelLeech(TaskListener):
         final_filename = ""
         new_caption = None
         
-        # Determine filename and new caption based on user preference
         if self.use_caption_as_filename and hasattr(message, 'caption') and message.caption:
             first_line = message.caption.split('\n')[0].strip()
             if first_line:
@@ -321,33 +318,23 @@ class ChannelLeech(TaskListener):
                 if clean_name and len(clean_name) >= 3:
                     original_extension = os.path.splitext(file_info['file_name'])[1]
                     
-                    # Use cleaned caption as the filename, ensuring the extension is present
                     final_filename = clean_name
                     if not final_filename.lower().endswith(original_extension.lower()):
                         final_filename += original_extension
                     
-                    # Also, use the cleaned name (without the extension) as the new caption
                     new_caption = os.path.splitext(final_filename)[0]
 
-        # Fallback to the original filename if caption logic doesn't apply or fails
         if not final_filename:
             final_filename = file_info['file_name']
-            new_caption = None  # Ensure no old caption is carried over
+            new_caption = None
 
-        # Create download directory
         os.makedirs(download_path, exist_ok=True)
         
-        # =========================================================================
-        # THE FIX: Set listener attributes for the name and the new caption.
-        # The TelegramDownloadHelper and subsequent uploader will use these values.
         self.name = final_filename
         self.caption = new_caption
-        # =========================================================================
         
-        # Start the download process
         telegram_helper = TelegramDownloadHelper(self)
         await telegram_helper.add_download(message, download_path, self.user_id)
-
 
     def _parse_arguments(self, args):
         """Parse command arguments including new --no-caption flag"""
