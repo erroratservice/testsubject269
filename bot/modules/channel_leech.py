@@ -336,7 +336,7 @@ class ChannelLeech(TaskListener):
         
         try:
             # Simple download call
-            await telegram_helper.add_download(message, download_path)
+            await telegram_helper.add_download(user, message, download_path)
             LOGGER.info("Download completed: %s", local_file_info['file_name'])
             
         except Exception as e:
