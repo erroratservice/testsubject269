@@ -67,10 +67,10 @@ class ChannelLeech(TaskListener):
         filter_text = f" with filter: {' '.join(self.filter_tags)}" if self.filter_tags else ""
         self.status_message = await send_message(
             self.message, 
-            f"🔄 **Starting channel leech** `{self.gid[:12]}`\n"
+            f"🔄 **Starting channel leech** `{self.mid[:12]}`\n"
             f"📋 **Channel:** `{self.channel_id}`{filter_text}\n"
             f"📤 **Upload to:** Telegram (with user settings)\n"
-            f"⏹️ **Cancel with:** `/cancel {self.gid[:12]}`"
+            f"⏹️ **Cancel with:** `/cancel {self.mid[:12]}`"
         )
 
         try:
@@ -319,9 +319,9 @@ class ChannelScanListener(TaskListener):
         filter_text = f" with filter: {' '.join(self.filter_tags)}" if self.filter_tags else ""
         status_msg = await send_message(
             self.message, 
-            f"🔍 **Starting scan** `{self.gid[:12]}`\n"
+            f"🔍 **Starting scan** `{self.mid[:12]}`\n"
             f"📋 **Channel:** `{self.channel_id}`{filter_text}\n"
-            f"⏹️ **Cancel with:** `/cancel {self.gid[:12]}`"
+            f"⏹️ **Cancel with:** `/cancel {self.mid[:12]}`"
         )
 
         try:
