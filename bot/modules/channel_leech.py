@@ -18,7 +18,6 @@ import unicodedata
 
 def remove_emoji(text):
     """Remove emojis and special characters from text"""
-    # Comprehensive emoji removal pattern
     emoji_pattern = re.compile(
         '['
         '\U0001F600-\U0001F64F'  # emoticons
@@ -35,16 +34,12 @@ def remove_emoji(text):
 
 def sanitize_filename(filename):
     """Sanitize filename for safe file system use"""
-    # Remove emojis first
     filename = remove_emoji(filename)
+    filename = re.sub(r'[<>:"/\\|?*]', '', filename)
+    filename = re.sub(r'[^\w\s.-]', '', filename)
+    filename = re.sub(r'\s+', ' ', filename)
+    filename = filename.strip()
     
-    # Remove or replace invalid characters for filenames
-    filename = re.sub(r'[<>:"/\\|?*]', '', filename)  # Remove invalid chars
-    filename = re.sub(r'[^\w\s.-]', '', filename)     # Keep only alphanumeric, spaces, dots, hyphens
-    filename = re.sub(r'\s+', ' ', filename)          # Replace multiple spaces with single space
-    filename = filename.strip()                       # Remove leading/trailing whitespace
-    
-    # Ensure filename isn't too long (most filesystems have 255 char limit)
     if len(filename) > 200:
         filename = filename[:200]
     
@@ -59,7 +54,7 @@ class ChannelLeech(TaskListener):
         self.filter_tags = []
         self.status_message = None
         self.operation_key = None
-        self.use_caption_as_filename = True  # New feature flag
+        self.use_caption_as_filename = True
         
         # FORCE LEECH MODE - Always upload to Telegram with user settings
         self.is_leech = True
@@ -68,8 +63,21 @@ class ChannelLeech(TaskListener):
         self.drive_id = None
         self.folder_id = None
         
+        # DEBUG: Log initialization
+        LOGGER.info("=== CHANNEL LEECH INIT DEBUG ===")
+        LOGGER.info(f"User ID: {message.from_user.id}")
+        LOGGER.info(f"Chat ID: {message.chat.id}")
+        
         # Now call parent constructor
         super().__init__()
+        
+        # DEBUG: Log after parent init
+        LOGGER.info("=== AFTER PARENT INIT ===")
+        debug_attrs = ['mid', 'gid', 'split_size', 'is_leech', 'rclone_path', 'leech_dest']
+        for attr in debug_attrs:
+            value = getattr(self, attr, 'ATTRIBUTE_NOT_SET')
+            LOGGER.info(f"  {attr}: {value} (type: {type(value)})")
+        LOGGER.info("=== INIT DEBUG END ===")
 
     async def new_event(self):
         """Main channel leech event handler"""
@@ -104,7 +112,6 @@ class ChannelLeech(TaskListener):
             self.message.from_user.id, self.channel_id, "channel_leech"
         )
 
-        # Send initial status
         filter_text = f" with filter: {' '.join(self.filter_tags)}" if self.filter_tags else ""
         caption_mode = "caption as filename" if self.use_caption_as_filename else "original filenames"
         
@@ -112,7 +119,7 @@ class ChannelLeech(TaskListener):
             self.message, 
             f"🔄 **Starting channel leech** `{str(self.mid)[:12]}`\n"
             f"📋 **Channel:** `{self.channel_id}`{filter_text}\n"
-            f"📤 **Upload to:** Telegram (with user settings)\n"
+            f"📤 **Upload to:** Telegram (DEBUG MODE)\n"
             f"📝 **Filename mode:** {caption_mode}\n"
             f"⏹️ **Cancel with:** `/cancel {str(self.mid)[:12]}`"
         )
@@ -144,7 +151,7 @@ class ChannelLeech(TaskListener):
                 self.status_message, 
                 f"📋 Processing channel: **{chat.title}**\n"
                 f"🔍 Scanning messages...\n"
-                f"📤 Upload: **Telegram** {caption_info}"
+                f"📤 Upload: **Telegram DEBUG MODE** {caption_info}"
             )
 
             scanner = ChannelScanner(user, self.channel_id, filter_tags=self.filter_tags)
@@ -184,7 +191,7 @@ class ChannelLeech(TaskListener):
                     continue
 
                 try:
-                    await self._leech_file_with_caption_filename(message, file_info)
+                    await self._leech_file_with_debug(message, file_info)
                     downloaded += 1
 
                     await database.add_file_entry(
@@ -198,6 +205,7 @@ class ChannelLeech(TaskListener):
                 except Exception as e:
                     errors += 1
                     LOGGER.error(f"Leech failed for {file_info['file_name']}: {e}")
+                    LOGGER.error(f"Exception details: {type(e).__name__}: {str(e)}")
                     await channel_status.update_operation(
                         self.operation_key, errors=errors
                     )
@@ -206,7 +214,7 @@ class ChannelLeech(TaskListener):
 
                 if batch_count >= 20:
                     status_text = (
-                        f"📊 **Progress Update**\n"
+                        f"📊 **Progress Update (DEBUG)**\n"
                         f"📋 Processed: {processed}\n"
                         f"⬇️ Downloaded: {downloaded}\n"
                         f"⏭️ Skipped: {skipped}\n"
@@ -220,13 +228,13 @@ class ChannelLeech(TaskListener):
                     batch_count = 0
 
             final_text = (
-                f"✅ **Channel leech completed!**\n\n"
+                f"✅ **Channel leech completed! (DEBUG)**\n\n"
                 f"📋 **Total processed:** {processed}\n"
                 f"⬇️ **Downloaded:** {downloaded}\n"
                 f"⏭️ **Skipped (duplicates):** {skipped}\n"
                 f"❌ **Errors:** {errors}\n\n"
                 f"🎯 **Channel:** `{self.channel_id}`\n"
-                f"📝 **Filename mode:** {'Caption as filename' if self.use_caption_as_filename else 'Original filenames'}"
+                f"📝 **Mode:** DEBUG - Check logs for details"
             )
             await edit_message(self.status_message, final_text)
 
@@ -239,53 +247,154 @@ class ChannelLeech(TaskListener):
         except Exception as e:
             await self.on_download_error(f"Channel processing error: {str(e)}")
 
-    async def _leech_file_with_caption_filename(self, message, file_info):
-        """Download file with caption-based filename (emoji-free)"""
+    async def _leech_file_with_debug(self, message, file_info):
+        """Download file with extensive debugging to identify split error"""
         download_path = f"{DOWNLOAD_DIR}{self.mid}/"
         
-        # Process filename based on caption if enabled
+        LOGGER.info("🔥🔥🔥 EXTENSIVE DEBUG START 🔥🔥🔥")
+        LOGGER.info(f"File: {file_info['file_name']}")
+        LOGGER.info(f"File size from file_info: {file_info.get('file_size', 'NOT_SET')}")
+        LOGGER.info(f"Download path: {download_path}")
+        
+        # Debug: Check ALL current attributes before any changes
+        LOGGER.info("=== ATTRIBUTES BEFORE USER SETTINGS LOAD ===")
+        all_attrs = dir(self)
+        relevant_attrs = [attr for attr in all_attrs if not attr.startswith('_') and 
+                         any(keyword in attr.lower() for keyword in ['split', 'leech', 'rclone', 'gdrive', 'size', 'dest'])]
+        
+        for attr in relevant_attrs:
+            try:
+                value = getattr(self, attr)
+                LOGGER.info(f"  {attr}: {value} (type: {type(value)})")
+            except Exception as e:
+                LOGGER.info(f"  {attr}: ERROR getting value - {e}")
+        
+        # Try to load user settings with extensive debugging
+        LOGGER.info("=== ATTEMPTING TO LOAD USER SETTINGS ===")
+        try:
+            from ..helper.ext_utils.user_utils import get_user_data
+            user_id = self.message.from_user.id
+            LOGGER.info(f"Getting user data for ID: {user_id}")
+            
+            user_settings = await get_user_data(user_id)
+            LOGGER.info(f"Raw user settings type: {type(user_settings)}")
+            LOGGER.info(f"Raw user settings: {user_settings}")
+            
+            if user_settings:
+                LOGGER.info("=== USER SETTINGS BREAKDOWN ===")
+                for key, value in user_settings.items():
+                    LOGGER.info(f"  {key}: {value} (type: {type(value)})")
+            else:
+                LOGGER.warning("User settings is None or empty!")
+                
+        except ImportError as e:
+            LOGGER.error(f"Failed to import get_user_data: {e}")
+            user_settings = {}
+        except Exception as e:
+            LOGGER.error(f"Error loading user settings: {e}")
+            user_settings = {}
+        
+        # Force settings with extensive logging
+        LOGGER.info("=== FORCING SETTINGS ===")
+        
+        # Set leech mode
+        old_is_leech = getattr(self, 'is_leech', 'NOT_SET')
+        self.is_leech = True
+        LOGGER.info(f"is_leech: {old_is_leech} → {self.is_leech}")
+        
+        # Clear cloud paths
+        old_rclone = getattr(self, 'rclone_path', 'NOT_SET')
+        self.rclone_path = None
+        LOGGER.info(f"rclone_path: {old_rclone} → {self.rclone_path}")
+        
+        old_gdrive = getattr(self, 'gdrive_id', 'NOT_SET')
+        self.gdrive_id = None
+        LOGGER.info(f"gdrive_id: {old_gdrive} → {self.gdrive_id}")
+        
+        self.drive_id = None
+        self.folder_id = None
+        
+        # Handle split size with extreme debugging
+        LOGGER.info("=== SPLIT SIZE HANDLING ===")
+        old_split_size = getattr(self, 'split_size', 'ATTRIBUTE_NOT_SET')
+        LOGGER.info(f"Current split_size: {old_split_size} (type: {type(old_split_size)})")
+        
+        # Try to get split size from user settings
+        if user_settings and 'split_size' in user_settings:
+            user_split_size = user_settings['split_size']
+            LOGGER.info(f"User split_size from settings: {user_split_size} (type: {type(user_split_size)})")
+            self.split_size = user_split_size
+        else:
+            LOGGER.warning("No split_size in user settings, using default 2GB")
+            self.split_size = 2147483648  # 2GB
+        
+        LOGGER.info(f"Final split_size: {self.split_size} (type: {type(self.split_size)})")
+        
+        # Set other user preferences
+        if user_settings:
+            self.leech_dest = user_settings.get('leech_dest')
+            self.upload_as_doc = user_settings.get('as_doc', True)
+            LOGGER.info(f"leech_dest: {self.leech_dest}")
+            LOGGER.info(f"upload_as_doc: {self.upload_as_doc}")
+        
+        # Process caption-based filename if enabled
         if self.use_caption_as_filename and hasattr(message, 'caption') and message.caption:
-            # Extract first line of caption
+            LOGGER.info("=== CAPTION FILENAME PROCESSING ===")
             first_line = message.caption.split('\n')[0].strip()
+            LOGGER.info(f"Caption first line: '{first_line}'")
             
             if first_line:
-                # Remove emojis and sanitize
                 clean_name = sanitize_filename(first_line)
+                LOGGER.info(f"Cleaned name: '{clean_name}'")
                 
-                if clean_name and len(clean_name) >= 3:  # Ensure meaningful filename
-                    # Preserve original file extension
+                if clean_name and len(clean_name) >= 3:
                     original_name = file_info['file_name']
                     if '.' in original_name:
                         extension = '.' + original_name.split('.')[-1]
                     else:
                         extension = ''
                     
-                    # Create new filename
                     new_filename = clean_name + extension
-                    
                     LOGGER.info(f"Filename change: '{original_name}' → '{new_filename}'")
-                    
-                    # Update file_info with new name
                     file_info['file_name'] = new_filename
-                    
-                    # Also update caption_first_line for database consistency
-                    file_info['caption_first_line'] = first_line
         
-        # Set leech mode
-        self.is_leech = True
-        self.rclone_path = None
-        self.gdrive_id = None
-        self.drive_id = None
-        self.folder_id = None
+        # Final attribute check
+        LOGGER.info("=== FINAL ATTRIBUTES BEFORE DOWNLOAD ===")
+        final_attrs = ['split_size', 'is_leech', 'rclone_path', 'gdrive_id', 'leech_dest', 'upload_as_doc']
+        for attr in final_attrs:
+            value = getattr(self, attr, 'NOT_SET')
+            LOGGER.info(f"  {attr}: {value} (type: {type(value)})")
         
         # Create download directory
         os.makedirs(download_path, exist_ok=True)
+        LOGGER.info(f"Created download directory: {download_path}")
         
-        LOGGER.info(f"Starting Telegram leech with user settings for: {file_info['file_name']}")
+        # Check file size from message
+        if hasattr(message, 'document') and message.document:
+            telegram_file_size = message.document.file_size
+            LOGGER.info(f"Telegram document file size: {telegram_file_size}")
+        elif hasattr(message, 'video') and message.video:
+            telegram_file_size = message.video.file_size
+            LOGGER.info(f"Telegram video file size: {telegram_file_size}")
+        else:
+            telegram_file_size = "UNKNOWN"
+            LOGGER.info(f"Could not determine Telegram file size")
+        
+        LOGGER.info(f"About to start download with TelegramDownloadHelper")
+        LOGGER.info("🔥🔥🔥 EXTENSIVE DEBUG END 🔥🔥🔥")
         
         # Use TelegramDownloadHelper for complete lifecycle management
-        telegram_helper = TelegramDownloadHelper(self)
-        await telegram_helper.add_download(message, download_path, "user")
+        try:
+            telegram_helper = TelegramDownloadHelper(self)
+            LOGGER.info("TelegramDownloadHelper created successfully")
+            
+            await telegram_helper.add_download(message, download_path, "user")
+            LOGGER.info("TelegramDownloadHelper.add_download completed")
+            
+        except Exception as e:
+            LOGGER.error(f"🚨 ERROR IN TELEGRAM DOWNLOAD HELPER: {type(e).__name__}: {str(e)}")
+            LOGGER.error(f"Error occurred with split_size: {getattr(self, 'split_size', 'NOT_SET')}")
+            raise e
 
     def _parse_arguments(self, args):
         """Parse command arguments including new --no-caption flag"""
@@ -378,7 +487,7 @@ async def channel_scan(client, message):
 
 @new_task
 async def channel_leech_cmd(client, message):
-    """Handle /cleech command - Telegram leech with caption filename"""
+    """Handle /cleech command - Telegram leech with extensive debugging"""
     await ChannelLeech(client, message).new_event()
 
 # Register handlers
