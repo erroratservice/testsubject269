@@ -31,6 +31,8 @@ class ChannelLeech(TaskListener):
         self.drive_id = None
         self.folder_id = None
         
+        # Let bot handle upload destination based on user's leech_dest setting
+        
         # Now call parent constructor
         super().__init__()
 
@@ -63,7 +65,7 @@ class ChannelLeech(TaskListener):
             self.message.from_user.id, self.channel_id, "channel_leech"
         )
 
-        # Send initial status with clear leech indication
+        # Send initial status with fixed string conversion
         filter_text = f" with filter: {' '.join(self.filter_tags)}" if self.filter_tags else ""
         self.status_message = await send_message(
             self.message, 
@@ -146,7 +148,7 @@ class ChannelLeech(TaskListener):
 
                 # Download and leech file to Telegram with user settings
                 try:
-                    await self._leech_file_with_settings(message, file_info)
+                    await self._leech_file_with_user_settings(message, file_info)
                     downloaded += 1
 
                     # Add to database after successful download
@@ -206,11 +208,11 @@ class ChannelLeech(TaskListener):
         except Exception as e:
             await self.on_download_error(f"Channel processing error: {str(e)}")
 
-    async def _leech_file_with_settings(self, message, file_info):
-        """Download file and trigger bot's upload system with user settings"""
+    async def _leech_file_with_user_settings(self, message, file_info):
+        """Download file and let bot handle upload with user settings"""
         download_path = f"{DOWNLOAD_DIR}{self.mid}/"
         
-        # Ensure leech mode with user settings
+        # Ensure leech mode is set
         self.is_leech = True
         self.rclone_path = None
         self.gdrive_id = None
@@ -223,27 +225,13 @@ class ChannelLeech(TaskListener):
         # Log leech mode confirmation
         LOGGER.info(f"Starting Telegram leech with user settings for: {file_info['file_name']}")
         
-        try:
-            # Use TelegramDownloadHelper which integrates with bot's upload system
-            telegram_helper = TelegramDownloadHelper(self)
-            
-            # This will download the file AND trigger the bot's upload system
-            # The bot's upload system will apply user settings automatically
-            await telegram_helper.add_download(message, download_path, "user")
-            
-            # The upload will be triggered automatically by TaskListener's
-            # on_download_complete -> on_upload_complete pipeline
-            # This ensures all user settings are applied:
-            # - Thumbnails
-            # - Custom captions  
-            # - File renaming
-            # - Media grouping
-            # - Upload as document/media preferences
-            # - File splitting if needed
-            
-        except Exception as e:
-            LOGGER.error(f"Failed to start download/upload pipeline: {e}")
-            raise
+        # Use TelegramDownloadHelper - it handles complete download/upload lifecycle
+        telegram_helper = TelegramDownloadHelper(self)
+        
+        # This will download AND trigger upload automatically with user settings
+        await telegram_helper.add_download(message, download_path, "user")
+        
+        # DO NOT call any upload methods manually - let TelegramDownloadHelper manage everything
 
     def _parse_arguments(self, args):
         """Parse command arguments"""
@@ -271,15 +259,6 @@ class ChannelLeech(TaskListener):
         self.is_cancelled = True
         LOGGER.info(f"Channel leech task cancelled for {self.channel_id}")
 
-    async def on_download_complete(self, path, file_size, **kwargs):
-        """Override to ensure proper upload trigger with user settings"""
-        # This method is called automatically when download completes
-        # It will trigger the bot's upload system with all user settings
-        LOGGER.info(f"Download completed for channel leech: {path}")
-        
-        # Call parent's on_download_complete to trigger upload with user settings
-        await super().on_download_complete(path, file_size, **kwargs)
-
 class ChannelScanListener(TaskListener):
     def __init__(self, client, message):
         # Set attributes BEFORE calling super().__init__()
@@ -289,11 +268,11 @@ class ChannelScanListener(TaskListener):
         self.filter_tags = []
         self.scanner = None
         
-        # Now call parent constructor - this assigns GID
+        # Now call parent constructor - this assigns task ID
         super().__init__()
 
     async def new_event(self):
-        """Handle scan command with GID assignment"""
+        """Handle scan command with task ID assignment"""
         text = self.message.text.split()
         
         if len(text) < 2:
@@ -315,7 +294,7 @@ class ChannelScanListener(TaskListener):
             await send_message(self.message, "❌ User session is required for channel scanning!")
             return
 
-        # Send initial status with GID info
+        # Send initial status with fixed string conversion
         filter_text = f" with filter: {' '.join(self.filter_tags)}" if self.filter_tags else ""
         status_msg = await send_message(
             self.message, 
@@ -346,7 +325,7 @@ class ChannelScanListener(TaskListener):
 
 @new_task
 async def channel_scan(client, message):
-    """Handle /scan command with GID support"""
+    """Handle /scan command with task ID support"""
     await ChannelScanListener(user, message).new_event()
 
 @new_task
