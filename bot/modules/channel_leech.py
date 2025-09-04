@@ -1,5 +1,6 @@
 from pyrogram.filters import command
 from pyrogram.handlers import MessageHandler
+from pyrogram.errors import FloodWait
 from bot import bot, user, DOWNLOAD_DIR, LOGGER
 
 from ..helper.ext_utils.bot_utils import new_task
@@ -10,6 +11,7 @@ from ..helper.mirror_leech_utils.channel_scanner import ChannelScanner
 from ..helper.mirror_leech_utils.channel_status import channel_status
 from ..helper.mirror_leech_utils.download_utils.telegram_download import TelegramDownloadHelper
 from ..helper.listeners.task_listener import TaskListener
+import asyncio
 
 class ChannelLeech(TaskListener):
     def __init__(self, client, message):
@@ -69,11 +71,14 @@ class ChannelLeech(TaskListener):
                 await channel_status.stop_operation(self.operation_key)
 
     async def _process_channel(self):
-        """Process channel messages and download files"""
+        """Process channel messages and download files with proper batching"""
         downloaded = 0
         skipped = 0
         processed = 0
         errors = 0
+        batch_count = 0
+        batch_sleep = 3  # Sleep 3 seconds between batches
+        message_sleep = 0.1  # Small delay between messages
 
         try:
             # Get channel info
@@ -86,12 +91,14 @@ class ChannelLeech(TaskListener):
             # Create scanner instance
             scanner = ChannelScanner(user, self.channel_id, filter_tags=self.filter_tags)
 
-            # Process messages
+            # Process messages with proper batching
             async for message in user.get_chat_history(self.channel_id):
                 if self.is_cancelled:
+                    LOGGER.info("Channel leech cancelled by user")
                     break
 
                 processed += 1
+                batch_count += 1
 
                 # Update operation stats
                 await channel_status.update_operation(
@@ -103,7 +110,7 @@ class ChannelLeech(TaskListener):
                 if not file_info:
                     continue
 
-                # Apply filter (change to 'any' for OR logic instead of 'all' for AND logic)
+                # Apply filter (change 'all' to 'any' for OR logic if needed)
                 if self.filter_tags:
                     search_text = file_info['search_text'].lower()
                     if not all(tag.lower() in search_text for tag in self.filter_tags):
@@ -144,8 +151,11 @@ class ChannelLeech(TaskListener):
                         self.operation_key, errors=errors
                     )
 
-                # Update status every 20 messages
-                if processed % 20 == 0:
+                # Small delay between messages
+                await asyncio.sleep(message_sleep)
+
+                # Batch processing with sleep and status updates
+                if batch_count >= 20:  # Update every 20 messages
                     status_text = (
                         f"📊 **Progress Update**\n"
                         f"📋 Processed: {processed}\n"
@@ -154,6 +164,11 @@ class ChannelLeech(TaskListener):
                         f"❌ Errors: {errors}"
                     )
                     await edit_message(self.status_message, status_text)
+                    
+                    # Sleep to respect rate limits
+                    LOGGER.info(f"Batch completed ({batch_count} messages), sleeping for {batch_sleep}s")
+                    await asyncio.sleep(batch_sleep)
+                    batch_count = 0
 
             # Final status
             final_text = (
@@ -166,6 +181,13 @@ class ChannelLeech(TaskListener):
             )
             await edit_message(self.status_message, final_text)
 
+        except FloodWait as e:
+            LOGGER.warning(f"FloodWait during channel processing: {e.x}s")
+            await edit_message(self.status_message, f"⏳ Rate limited, waiting {e.x} seconds...")
+            await asyncio.sleep(e.x + 1)
+            # Continue processing after wait
+            LOGGER.info("Resuming channel processing after FloodWait")
+            
         except Exception as e:
             await self.on_download_error(f"Channel processing error: {str(e)}")
 
@@ -198,6 +220,11 @@ class ChannelLeech(TaskListener):
                 
         return parsed
 
+    def cancel_task(self):
+        """Cancel the channel leech task"""
+        self.is_cancelled = True
+        LOGGER.info(f"Channel leech task cancelled for {self.channel_id}")
+
 @new_task
 async def channel_scan(_, message):
     """Handle /scan command for building file database"""
@@ -224,8 +251,12 @@ async def channel_scan(_, message):
     # Start scanning
     status_msg = await send_message(message, f"🔍 Starting scan of `{channel_id}`...")
     
-    scanner = ChannelScanner(user, channel_id, filter_tags=filter_tags)
-    await scanner.scan(status_msg)
+    try:
+        scanner = ChannelScanner(user, channel_id, filter_tags=filter_tags)
+        await scanner.scan(status_msg)
+    except Exception as e:
+        LOGGER.error(f"Scanning error: {e}")
+        await edit_message(status_msg, f"❌ Scan failed: {str(e)}")
 
 @new_task
 async def channel_leech_cmd(client, message):
