@@ -12,6 +12,7 @@ from ..helper.mirror_leech_utils.channel_status import channel_status
 from ..helper.mirror_leech_utils.download_utils.telegram_download import TelegramDownloadHelper
 from ..helper.listeners.task_listener import TaskListener
 import asyncio
+import os
 
 class ChannelLeech(TaskListener):
     def __init__(self, client, message):
@@ -22,6 +23,14 @@ class ChannelLeech(TaskListener):
         self.filter_tags = []
         self.status_message = None
         self.operation_key = None
+        
+        # FORCE LEECH MODE - Always upload to Telegram with user settings
+        self.is_leech = True
+        self.rclone_path = None
+        self.gdrive_id = None
+        self.drive_id = None
+        self.folder_id = None
+        self.upload_dest = message.chat.id  # Upload to current chat
         
         # Now call parent constructor
         super().__init__()
@@ -37,7 +46,8 @@ class ChannelLeech(TaskListener):
                 "**Examples:**\n"
                 "`/cleech -ch @movies_channel`\n"
                 "`/cleech -ch @movies_channel -f 2024 BluRay`\n"
-                "`/cleech -ch -1001234567890 -f movie`"
+                "`/cleech -ch -1001234567890 -f movie`\n\n"
+                "**Note:** Files will be uploaded to Telegram with your user settings"
             )
             await send_message(self.message, usage_text)
             return
@@ -54,12 +64,13 @@ class ChannelLeech(TaskListener):
             self.message.from_user.id, self.channel_id, "channel_leech"
         )
 
-        # Send initial status
+        # Send initial status with clear leech indication
         filter_text = f" with filter: {' '.join(self.filter_tags)}" if self.filter_tags else ""
         self.status_message = await send_message(
             self.message, 
             f"🔄 **Starting channel leech** `{self.gid[:12]}`\n"
             f"📋 **Channel:** `{self.channel_id}`{filter_text}\n"
+            f"📤 **Upload to:** Telegram (with user settings)\n"
             f"⏹️ **Cancel with:** `/cancel {self.gid[:12]}`"
         )
 
@@ -73,7 +84,7 @@ class ChannelLeech(TaskListener):
                 await channel_status.stop_operation(self.operation_key)
 
     async def _process_channel(self):
-        """Process channel messages and download files with proper batching"""
+        """Process channel messages and download files for Telegram upload"""
         downloaded = 0
         skipped = 0
         processed = 0
@@ -87,7 +98,9 @@ class ChannelLeech(TaskListener):
             chat = await user.get_chat(self.channel_id)
             await edit_message(
                 self.status_message, 
-                f"📋 Processing channel: **{chat.title}**\n🔍 Scanning messages..."
+                f"📋 Processing channel: **{chat.title}**\n"
+                f"🔍 Scanning messages...\n"
+                f"📤 Upload destination: **Telegram** (with user settings)"
             )
 
             # Create scanner instance
@@ -132,9 +145,9 @@ class ChannelLeech(TaskListener):
                     )
                     continue
 
-                # Download file
+                # Download and leech file to Telegram with user settings
                 try:
-                    await self._download_file(message, file_info)
+                    await self._leech_file_with_settings(message, file_info)
                     downloaded += 1
 
                     # Add to database after successful download
@@ -148,7 +161,7 @@ class ChannelLeech(TaskListener):
 
                 except Exception as e:
                     errors += 1
-                    LOGGER.error(f"Download failed for {file_info['file_name']}: {e}")
+                    LOGGER.error(f"Leech failed for {file_info['file_name']}: {e}")
                     await channel_status.update_operation(
                         self.operation_key, errors=errors
                     )
@@ -163,7 +176,8 @@ class ChannelLeech(TaskListener):
                         f"📋 Processed: {processed}\n"
                         f"⬇️ Downloaded: {downloaded}\n"
                         f"⏭️ Skipped: {skipped}\n"
-                        f"❌ Errors: {errors}"
+                        f"❌ Errors: {errors}\n"
+                        f"📤 Upload mode: **Telegram with user settings**"
                     )
                     await edit_message(self.status_message, status_text)
                     
@@ -179,7 +193,8 @@ class ChannelLeech(TaskListener):
                 f"⬇️ **Downloaded:** {downloaded}\n"
                 f"⏭️ **Skipped (duplicates):** {skipped}\n"
                 f"❌ **Errors:** {errors}\n\n"
-                f"🎯 **Channel:** `{self.channel_id}`"
+                f"🎯 **Channel:** `{self.channel_id}`\n"
+                f"📤 **Upload mode:** **Telegram with user settings**"
             )
             await edit_message(self.status_message, final_text)
 
@@ -192,13 +207,44 @@ class ChannelLeech(TaskListener):
         except Exception as e:
             await self.on_download_error(f"Channel processing error: {str(e)}")
 
-    async def _download_file(self, message, file_info):
-        """Download individual file"""
+    async def _leech_file_with_settings(self, message, file_info):
+        """Download file and trigger bot's upload system with user settings"""
         download_path = f"{DOWNLOAD_DIR}{self.mid}/"
         
-        # Use existing telegram download helper
-        telegram_helper = TelegramDownloadHelper(self)
-        await telegram_helper.add_download(message, download_path, "user")
+        # Ensure leech mode with user settings
+        self.is_leech = True
+        self.rclone_path = None
+        self.gdrive_id = None
+        self.drive_id = None
+        self.folder_id = None
+        
+        # Create download directory if it doesn't exist
+        os.makedirs(download_path, exist_ok=True)
+        
+        # Log leech mode confirmation
+        LOGGER.info(f"Starting Telegram leech with user settings for: {file_info['file_name']}")
+        
+        try:
+            # Use TelegramDownloadHelper which integrates with bot's upload system
+            telegram_helper = TelegramDownloadHelper(self)
+            
+            # This will download the file AND trigger the bot's upload system
+            # The bot's upload system will apply user settings automatically
+            await telegram_helper.add_download(message, download_path, "user")
+            
+            # The upload will be triggered automatically by TaskListener's
+            # on_download_complete -> on_upload_complete pipeline
+            # This ensures all user settings are applied:
+            # - Thumbnails
+            # - Custom captions  
+            # - File renaming
+            # - Media grouping
+            # - Upload as document/media preferences
+            # - File splitting if needed
+            
+        except Exception as e:
+            LOGGER.error(f"Failed to start download/upload pipeline: {e}")
+            raise
 
     def _parse_arguments(self, args):
         """Parse command arguments"""
@@ -226,6 +272,15 @@ class ChannelLeech(TaskListener):
         self.is_cancelled = True
         LOGGER.info(f"Channel leech task cancelled for {self.channel_id}")
 
+    async def on_download_complete(self, path, file_size, **kwargs):
+        """Override to ensure proper upload trigger with user settings"""
+        # This method is called automatically when download completes
+        # It will trigger the bot's upload system with all user settings
+        LOGGER.info(f"Download completed for channel leech: {path}")
+        
+        # Call parent's on_download_complete to trigger upload with user settings
+        await super().on_download_complete(path, file_size, **kwargs)
+
 class ChannelScanListener(TaskListener):
     def __init__(self, client, message):
         # Set attributes BEFORE calling super().__init__()
@@ -248,7 +303,8 @@ class ChannelScanListener(TaskListener):
                 "**Examples:**\n"
                 "`/scan @my_channel`\n"
                 "`/scan -1001234567890`\n"
-                "`/scan @movies_channel movie`"
+                "`/scan @movies_channel movie`\n\n"
+                "**Purpose:** Build file database for duplicate detection"
             )
             await send_message(self.message, usage_text)
             return
@@ -296,7 +352,7 @@ async def channel_scan(client, message):
 
 @new_task
 async def channel_leech_cmd(client, message):
-    """Handle /cleech command"""
+    """Handle /cleech command - Telegram leech with user settings"""
     await ChannelLeech(client, message).new_event()
 
 # Register handlers
