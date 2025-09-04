@@ -77,7 +77,7 @@ class TelegramDownloadHelper:
             if self._listener.is_cancelled:
                 await self._on_download_error("Cancelled by user!")
                 return
-        except (FloodWait) as f:
+        except FloodWait as f:
             LOGGER.warning(str(f))
             await sleep(f.value)
         except Exception as e:
@@ -89,7 +89,7 @@ class TelegramDownloadHelper:
         elif not self._listener.is_cancelled:
             await self._on_download_error("Internal error occurred")
 
-    async def add_download(self, message, path, session):
+    async def add_download(self, message, path, session, name="", caption=""):
         self.session = session
         if (
             self.session not in ["user", "bot"]
@@ -120,12 +120,21 @@ class TelegramDownloadHelper:
                 download = media.file_unique_id not in GLOBAL_GID
 
             if download:
-                if self._listener.name == "":
+                # Prioritize the name passed directly for channel leech
+                if name:
+                    self._listener.name = name
+                    path = path + self._listener.name
+                elif self._listener.name == "":
                     self._listener.name = (
                         media.file_name if hasattr(media, "file_name") else "None"
                     )
                 else:
                     path = path + self._listener.name
+
+                # Set caption if passed directly
+                if caption:
+                    self._listener.caption = caption
+
                 self._listener.size = media.file_size
                 gid = media.file_unique_id
 
