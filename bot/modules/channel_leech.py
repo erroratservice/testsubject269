@@ -30,7 +30,6 @@ class ChannelLeech(TaskListener):
         self.gdrive_id = None
         self.drive_id = None
         self.folder_id = None
-        self.upload_dest = message.chat.id  # Upload to current chat
         
         # Now call parent constructor
         super().__init__()
