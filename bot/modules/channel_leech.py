@@ -340,4 +340,186 @@ class ChannelLeech(TaskListener):
         isolated_file_info = deepcopy(file_info)
         LOGGER.info(f"🔄 MSG_{message.id}: Created isolated file_info copy")
         
-        # ✅ Generate unique filename using
+        # ✅ Generate unique filename using message-specific data only
+        if self.use_caption_as_filename and hasattr(message, 'caption') and message.caption:
+            first_line = message.caption.split('\n')[0].strip()
+            LOGGER.info(f"📝 MSG_{message.id}: Caption first line: '{first_line}'")
+            
+            if first_line and len(first_line) >= 3:
+                # Start completely fresh for THIS message
+                clean_name = sanitize_filename(first_line)
+                LOGGER.info(f"🧹 MSG_{message.id}: Cleaned caption: '{clean_name}'")
+                
+                if clean_name and len(clean_name) >= 3:
+                    # Get extension from THIS file only
+                    original_extension = os.path.splitext(isolated_file_info['file_name'])[1]
+                    
+                    # Build unique filename with message ID to prevent ANY collisions
+                    unique_filename = f"{clean_name}_{message.id}{original_extension}"
+                    
+                    # Update ONLY the isolated copy
+                    isolated_file_info['file_name'] = unique_filename
+                    
+                    LOGGER.info(f"✅ MSG_{message.id}: Isolated filename: '{file_info['file_name']}' → '{unique_filename}'")
+                else:
+                    # Clean name too short, use original filename with unique suffix
+                    base_name = os.path.splitext(isolated_file_info['file_name'])[0]
+                    extension = os.path.splitext(isolated_file_info['file_name'])[1]
+                    isolated_file_info['file_name'] = f"{base_name}_{message.id}{extension}"
+                    LOGGER.info(f"📝 MSG_{message.id}: Caption too short, using original with suffix: {isolated_file_info['file_name']}")
+            else:
+                # Caption too short, use original with unique ID
+                base_name = os.path.splitext(isolated_file_info['file_name'])[0]
+                extension = os.path.splitext(isolated_file_info['file_name'])[1]
+                isolated_file_info['file_name'] = f"{base_name}_{message.id}{extension}"
+                LOGGER.info(f"📝 MSG_{message.id}: Empty caption, using original with suffix: {isolated_file_info['file_name']}")
+        else:
+            # No caption mode - use original filename with unique ID
+            base_name = os.path.splitext(isolated_file_info['file_name'])[0]
+            extension = os.path.splitext(isolated_file_info['file_name'])[1]
+            isolated_file_info['file_name'] = f"{base_name}_{message.id}{extension}"
+            LOGGER.info(f"📝 MSG_{message.id}: No caption mode, using original with suffix: {isolated_file_info['file_name']}")
+        
+        # ✅ Create download directory
+        os.makedirs(download_path, exist_ok=True)
+        
+        # ✅ Log this specific file's processing with complete context
+        LOGGER.info(f"📊 MSG_{message.id}: ISOLATION CONTEXT:")
+        LOGGER.info(f"    📁 Final filename: {isolated_file_info['file_name']}")
+        LOGGER.info(f"    📏 File size: {isolated_file_info.get('file_size', 'unknown')}")
+        LOGGER.info(f"    ⚙️ is_leech: {self.is_leech}")
+        LOGGER.info(f"    📏 split_size: {self.split_size}")
+        LOGGER.info(f"    📄 as_doc: {self.as_doc}")
+        LOGGER.info(f"    🎯 leech_dest: {self.leech_dest}")
+        
+        # ✅ Create completely isolated download helper instance
+        telegram_helper = TelegramDownloadHelper(self)
+        
+        # ✅ Process with isolated file info - no shared references
+        try:
+            LOGGER.info(f"📥 MSG_{message.id}: Starting download with isolated context")
+            
+            # Temporarily update the original file_info for download processing
+            original_filename = file_info['file_name']
+            file_info['file_name'] = isolated_file_info['file_name']
+            
+            await telegram_helper.add_download(
+                message=message,
+                path=download_path, 
+                tag=f"user_isolated_{message.id}"
+            )
+            
+            LOGGER.info(f"✅ MSG_{message.id}: Download completed successfully with isolated filename: {isolated_file_info['file_name']}")
+            
+        except Exception as e:
+            LOGGER.error(f"❌ MSG_{message.id}: Download failed: {e}")
+            raise
+        finally:
+            # Restore original filename to prevent affecting other operations
+            file_info['file_name'] = original_filename
+            LOGGER.info(f"🔄 MSG_{message.id}: Restored original filename for safety")
+
+    def _parse_arguments(self, args):
+        """Parse command arguments including new --no-caption flag"""
+        parsed = {}
+        i = 0
+        
+        while i < len(args):
+            if args[i] == '-ch' and i + 1 < len(args):
+                parsed['channel'] = args[i + 1]
+                i += 2
+            elif args[i] == '-f' and i + 1 < len(args):
+                filter_text = args[i + 1]
+                if filter_text.startswith('"') and filter_text.endswith('"'):
+                    filter_text = filter_text[1:-1]
+                parsed['filter'] = filter_text.split()
+                i += 2
+            elif args[i] == '--no-caption':
+                parsed['no_caption'] = True
+                i += 1
+            else:
+                i += 1
+                
+        return parsed
+
+    def cancel_task(self):
+        """Cancel the channel leech task"""
+        self.is_cancelled = True
+        LOGGER.info(f"❌ Channel leech task cancelled for {self.channel_id}")
+
+class ChannelScanListener(TaskListener):
+    def __init__(self, client, message):
+        self.client = client
+        self.message = message
+        self.channel_id = None
+        self.filter_tags = []
+        self.scanner = None
+        super().__init__()
+
+    async def new_event(self):
+        """Handle scan command with task ID assignment"""
+        text = self.message.text.split()
+        
+        if len(text) < 2:
+            usage_text = (
+                "**Usage:** `/scan <channel_id> [filter]`\n\n"
+                "**Examples:**\n"
+                "`/scan @my_channel`\n"
+                "`/scan -1001234567890`\n"
+                "`/scan @movies_channel movie`\n\n"
+                "**Purpose:** Build file database for duplicate detection"
+            )
+            await send_message(self.message, usage_text)
+            return
+
+        self.channel_id = text[1]
+        self.filter_tags = text[2:] if len(text) > 2 else []
+
+        if not user:
+            await send_message(self.message, "❌ User session is required for channel scanning!")
+            return
+
+        filter_text = f" with filter: {' '.join(self.filter_tags)}" if self.filter_tags else ""
+        status_msg = await send_message(
+            self.message, 
+            f"🔍 **Starting scan** `{str(self.mid)[:12]}`\n"
+            f"📋 **Channel:** `{self.channel_id}`{filter_text}\n"
+            f"⏹️ **Cancel with:** `/cancel {str(self.mid)[:12]}`"
+        )
+
+        try:
+            self.scanner = ChannelScanner(user, self.channel_id, filter_tags=self.filter_tags)
+            self.scanner.listener = self
+            await self.scanner.scan(status_msg)
+            
+        except Exception as e:
+            LOGGER.error(f"Channel scan error: {e}")
+            await edit_message(status_msg, f"❌ Scan failed: {str(e)}")
+
+    def cancel_task(self):
+        """Cancel the scan operation"""
+        self.is_cancelled = True
+        if self.scanner:
+            self.scanner.running = False
+        LOGGER.info(f"Channel scan cancelled for {self.channel_id}")
+
+@new_task
+async def channel_scan(client, message):
+    """Handle /scan command with task ID support"""
+    await ChannelScanListener(user, message).new_event()
+
+@new_task
+async def channel_leech_cmd(client, message):
+    """Handle /cleech command - ENHANCED DEBUG VERSION with complete state isolation"""
+    await ChannelLeech(client, message).new_event()
+
+# Register handlers
+bot.add_handler(MessageHandler(
+    channel_scan,
+    filters=command("scan") & CustomFilters.authorized
+))
+
+bot.add_handler(MessageHandler(
+    channel_leech_cmd, 
+    filters=command("cleech") & CustomFilters.authorized
+))
