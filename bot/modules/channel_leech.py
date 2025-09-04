@@ -382,7 +382,7 @@ class ChannelLeech(TaskListener):
         file_info['file_name'] = updated_file_info['file_name']
         
         try:
-            await telegram_helper.add_download(user, message, download_path)
+            await telegram_helper.add_download(message, download_path, user)
         finally:
             # Restore original filename to avoid affecting other operations
             file_info['file_name'] = original_file_name
