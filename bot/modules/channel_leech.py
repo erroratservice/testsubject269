@@ -58,7 +58,9 @@ class ChannelLeech(TaskListener):
         filter_text = f" with filter: {' '.join(self.filter_tags)}" if self.filter_tags else ""
         self.status_message = await send_message(
             self.message, 
-            f"🔄 Starting channel leech from `{self.channel_id}`{filter_text}"
+            f"🔄 **Starting channel leech** `{self.gid[:12]}`\n"
+            f"📋 **Channel:** `{self.channel_id}`{filter_text}\n"
+            f"⏹️ **Cancel with:** `/cancel {self.gid[:12]}`"
         )
 
         try:
@@ -185,7 +187,6 @@ class ChannelLeech(TaskListener):
             LOGGER.warning(f"FloodWait during channel processing: {e.x}s")
             await edit_message(self.status_message, f"⏳ Rate limited, waiting {e.x} seconds...")
             await asyncio.sleep(e.x + 1)
-            # Continue processing after wait
             LOGGER.info("Resuming channel processing after FloodWait")
             
         except Exception as e:
@@ -225,38 +226,73 @@ class ChannelLeech(TaskListener):
         self.is_cancelled = True
         LOGGER.info(f"Channel leech task cancelled for {self.channel_id}")
 
-@new_task
-async def channel_scan(_, message):
-    """Handle /scan command for building file database"""
-    args = message.text.split()
-    
-    if len(args) < 2:
-        usage_text = (
-            "**Usage:** `/scan <channel_id> [filter]`\n\n"
-            "**Examples:**\n"
-            "`/scan @my_channel`\n"
-            "`/scan -1001234567890`\n"
-            "`/scan @movies_channel movie`"
+class ChannelScanListener(TaskListener):
+    def __init__(self, client, message):
+        # Set attributes BEFORE calling super().__init__()
+        self.client = client
+        self.message = message
+        self.channel_id = None
+        self.filter_tags = []
+        self.scanner = None
+        
+        # Now call parent constructor - this assigns GID
+        super().__init__()
+
+    async def new_event(self):
+        """Handle scan command with GID assignment"""
+        text = self.message.text.split()
+        
+        if len(text) < 2:
+            usage_text = (
+                "**Usage:** `/scan <channel_id> [filter]`\n\n"
+                "**Examples:**\n"
+                "`/scan @my_channel`\n"
+                "`/scan -1001234567890`\n"
+                "`/scan @movies_channel movie`"
+            )
+            await send_message(self.message, usage_text)
+            return
+
+        self.channel_id = text[1]
+        self.filter_tags = text[2:] if len(text) > 2 else []
+
+        if not user:
+            await send_message(self.message, "❌ User session is required for channel scanning!")
+            return
+
+        # Send initial status with GID info
+        filter_text = f" with filter: {' '.join(self.filter_tags)}" if self.filter_tags else ""
+        status_msg = await send_message(
+            self.message, 
+            f"🔍 **Starting scan** `{self.gid[:12]}`\n"
+            f"📋 **Channel:** `{self.channel_id}`{filter_text}\n"
+            f"⏹️ **Cancel with:** `/cancel {self.gid[:12]}`"
         )
-        await send_message(message, usage_text)
-        return
 
-    channel_id = args[1]
-    filter_tags = args[2:] if len(args) > 2 else []
+        try:
+            # Create scanner with cancellation support
+            self.scanner = ChannelScanner(user, self.channel_id, filter_tags=self.filter_tags)
+            
+            # Pass the listener for cancellation checks
+            self.scanner.listener = self
+            
+            await self.scanner.scan(status_msg)
+            
+        except Exception as e:
+            LOGGER.error(f"Channel scan error: {e}")
+            await edit_message(status_msg, f"❌ Scan failed: {str(e)}")
 
-    if not user:
-        await send_message(message, "❌ User session is required for channel scanning!")
-        return
+    def cancel_task(self):
+        """Cancel the scan operation"""
+        self.is_cancelled = True
+        if self.scanner:
+            self.scanner.running = False
+        LOGGER.info(f"Channel scan cancelled for {self.channel_id}")
 
-    # Start scanning
-    status_msg = await send_message(message, f"🔍 Starting scan of `{channel_id}`...")
-    
-    try:
-        scanner = ChannelScanner(user, channel_id, filter_tags=filter_tags)
-        await scanner.scan(status_msg)
-    except Exception as e:
-        LOGGER.error(f"Scanning error: {e}")
-        await edit_message(status_msg, f"❌ Scan failed: {str(e)}")
+@new_task
+async def channel_scan(client, message):
+    """Handle /scan command with GID support"""
+    await ChannelScanListener(user, message).new_event()
 
 @new_task
 async def channel_leech_cmd(client, message):
