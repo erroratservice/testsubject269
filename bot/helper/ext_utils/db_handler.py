@@ -251,7 +251,7 @@ class DbManager:
                 "date_added": file_data.get("date"),
                 "indexed_at": datetime.utcnow()
             }
-            await self.db.file_catalog.insert_one(document)
+            await self._db.file_catalog.insert_one(document)
         except PyMongoError as e:
             LOGGER.error(f"Error adding file entry: {e}")
 
@@ -268,7 +268,7 @@ class DbManager:
                     {"file_name": {"$regex": file_name, "$options": "i"}},
                     {"caption_first_line": {"$regex": file_name, "$options": "i"}}
                 ]
-            result = await self.db.file_catalog.find_one(query)
+            result = await self._db.file_catalog.find_one(query)
             return result is not None
         except PyMongoError as e:
             LOGGER.error(f"Error checking file exists: {e}")
@@ -281,7 +281,7 @@ class DbManager:
             if channel_id:
                 query["channel_id"] = str(channel_id)
                 
-            total_files = await self.db.file_catalog.count_documents(query)
+            total_files = await self._db.file_catalog.count_documents(query)
             
             if channel_id:
                 return {"channel_id": channel_id, "total_files": total_files}
@@ -290,7 +290,7 @@ class DbManager:
                     {"$group": {"_id": "$channel_id", "count": {"$sum": 1}}},
                     {"$sort": {"count": -1}}
                 ]
-                channel_stats = await self.db.file_catalog.aggregate(pipeline).to_list(None)
+                channel_stats = await self._db.file_catalog.aggregate(pipeline).to_list(None)
                 return {"total_files": total_files, "by_channel": channel_stats}
                 
         except PyMongoError as e:
