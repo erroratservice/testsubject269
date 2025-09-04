@@ -120,7 +120,7 @@ class TelegramDownloadHelper:
                 download = media.file_unique_id not in GLOBAL_GID
 
             if download:
-                # Prioritize the name passed directly for channel leech
+                # This logic now prioritizes the name passed directly for channel leech
                 if name:
                     self._listener.name = name
                     path = path + self._listener.name
