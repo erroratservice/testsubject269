@@ -21,7 +21,7 @@ class ChannelScanner:
         self.processed = 0
         self.db_entries = 0
         self.status_message = None
-        self.batch_sleep = 2  # Sleep 2 seconds after each batch
+        self.batch_sleep = 5  # Sleep 2 seconds after each batch
         self.message_sleep = 0.1  # Small delay between messages
 
     async def scan(self, status_msg=None):
