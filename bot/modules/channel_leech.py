@@ -178,7 +178,7 @@ class ChannelLeech(TaskListener):
             self.message, 
             f"Starting channel leech `{str(self.mid)[:12]}`\n"
             f"**Channel:** `{self.channel_id}`{filter_text}\n"
-            f"**Upload:** TaskListener Pipeline (Unique Filenames)\n"
+            f"**Upload:** TaskListener Pipeline (Clean Filenames)\n"
             f"**Filename mode:** {caption_mode}\n"
             f"**Split size:** {self.split_size} bytes\n"
             f"**As document:** {self.as_doc}\n"
@@ -206,13 +206,13 @@ class ChannelLeech(TaskListener):
 
         try:
             chat = await user.get_chat(self.channel_id)
-            caption_info = "with unique caption filenames" if self.use_caption_as_filename else "with original filenames"
+            caption_info = "with clean caption filenames" if self.use_caption_as_filename else "with original filenames"
             
             await edit_message(
                 self.status_message, 
                 f"Processing channel: **{chat.title}**\n"
                 f"Scanning messages...\n"
-                f"Upload: **Unique Filename System** {caption_info}"
+                f"Upload: **Clean Filename System** {caption_info}"
             )
 
             scanner = ChannelScanner(user, self.channel_id, filter_tags=self.filter_tags)
@@ -279,7 +279,7 @@ class ChannelLeech(TaskListener):
                         f"Downloaded: {downloaded}\n"
                         f"Skipped: {skipped}\n"
                         f"Errors: {errors}\n"
-                        f"Using: Unique Filename System"
+                        f"Using: Clean Filename System"
                     )
                     await edit_message(self.status_message, status_text)
                     
@@ -294,7 +294,7 @@ class ChannelLeech(TaskListener):
                 f"**Skipped (duplicates):** {skipped}\n"
                 f"**Errors:** {errors}\n\n"
                 f"**Channel:** `{self.channel_id}`\n"
-                f"**System:** Unique Filenames Applied"
+                f"**System:** Clean Filenames Applied"
             )
             await edit_message(self.status_message, final_text)
 
@@ -308,10 +308,12 @@ class ChannelLeech(TaskListener):
             await self.on_download_error(f"Channel processing error: {str(e)}")
 
     async def _download_file_tasklistener_pipeline(self, message, file_info):
-        """Download file with proper unique filename generation per file"""
+        """Download file, using cleaned caption for filename and setting it as the new caption, without unique IDs."""
         download_path = f"{DOWNLOAD_DIR}{self.mid}/"
+        final_filename = ""
+        new_caption = None
         
-        # Generate completely fresh filename for EACH file
+        # Determine filename and new caption based on user preference
         if self.use_caption_as_filename and hasattr(message, 'caption') and message.caption:
             first_line = message.caption.split('\n')[0].strip()
             if first_line:
@@ -319,44 +321,33 @@ class ChannelLeech(TaskListener):
                 if clean_name and len(clean_name) >= 3:
                     original_extension = os.path.splitext(file_info['file_name'])[1]
                     
-                    if not clean_name.lower().endswith(original_extension.lower()):
-                        clean_name = clean_name + original_extension
+                    # Use cleaned caption as the filename, ensuring the extension is present
+                    final_filename = clean_name
+                    if not final_filename.lower().endswith(original_extension.lower()):
+                        final_filename += original_extension
                     
-                    unique_id = message.id
-                    final_filename = f"{clean_name[:-len(original_extension)]}_{unique_id}{original_extension}"
-                    
-                    updated_file_info = file_info.copy()
-                    updated_file_info['file_name'] = final_filename
-                else:
-                    base_name = os.path.splitext(file_info['file_name'])[0]
-                    extension = os.path.splitext(file_info['file_name'])[1]
-                    updated_file_info = file_info.copy()
-                    updated_file_info['file_name'] = f"{base_name}_{message.id}{extension}"
-            else:
-                base_name = os.path.splitext(file_info['file_name'])[0]
-                extension = os.path.splitext(file_info['file_name'])[1]
-                updated_file_info = file_info.copy()
-                updated_file_info['file_name'] = f"{base_name}_{message.id}{extension}"
-        else:
-            base_name = os.path.splitext(file_info['file_name'])[0]
-            extension = os.path.splitext(file_info['file_name'])[1]
-            updated_file_info = file_info.copy()
-            updated_file_info['file_name'] = f"{base_name}_{message.id}{extension}"
-        
+                    # Also, use the cleaned name (without the extension) as the new caption
+                    new_caption = os.path.splitext(final_filename)[0]
+
+        # Fallback to the original filename if caption logic doesn't apply or fails
+        if not final_filename:
+            final_filename = file_info['file_name']
+            new_caption = None  # Ensure no old caption is carried over
+
         # Create download directory
         os.makedirs(download_path, exist_ok=True)
         
-        # ===================================================================
-        # THE FIX: Explicitly set the listener's name for THIS specific file.
-        # This is what the TelegramDownloadHelper will use for the download.
-        self.name = updated_file_info['file_name']
-        # ===================================================================
+        # =========================================================================
+        # THE FIX: Set listener attributes for the name and the new caption.
+        # The TelegramDownloadHelper and subsequent uploader will use these values.
+        self.name = final_filename
+        self.caption = new_caption
+        # =========================================================================
         
-        # This ensures each file gets its own unique name in the TaskListener pipeline
+        # Start the download process
         telegram_helper = TelegramDownloadHelper(self)
-        
-        # Call the download helper with the corrected user_id
         await telegram_helper.add_download(message, download_path, self.user_id)
+
 
     def _parse_arguments(self, args):
         """Parse command arguments including new --no-caption flag"""
