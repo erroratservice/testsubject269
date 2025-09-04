@@ -1,7 +1,7 @@
 from pyrogram.filters import command
 from pyrogram.handlers import MessageHandler
 from pyrogram.errors import FloodWait
-from bot import bot, user, DOWNLOAD_DIR, LOGGER
+from bot import bot, user, DOWNLOAD_DIR, LOGGER, user_data, config_dict
 
 from ..helper.ext_utils.bot_utils import new_task
 from ..helper.ext_utils.db_handler import database
@@ -56,7 +56,6 @@ class ChannelLeech(TaskListener):
         self.use_caption_as_filename = True
         
         # ✅ Critical: Set is_leech BEFORE calling super().__init__()
-        # This ensures TaskListener knows this is a leech operation
         self.is_leech = True
         
         # ✅ Clear cloud upload paths to force Telegram upload
@@ -64,14 +63,81 @@ class ChannelLeech(TaskListener):
         self.gdrive_id = None
         self.drive_id = None
         self.folder_id = None
-        self.up_dest = None  # Let user_dict handle leech destination
+        self.up_dest = None  # Will be set by user settings fallback
         
         # Now call parent constructor - this loads user_dict properly
         super().__init__()
         
-        # ✅ Log user settings for debugging
-        LOGGER.info("=== TASKLISTENER USER SETTINGS LOADED ===")
-        LOGGER.info(f"Available user_dict: {getattr(self, 'user_dict', 'NOT_SET')}")
+        # ✅ CRITICAL: Apply user settings with proper three-tier fallback system
+        self._apply_user_settings_with_fallbacks()
+
+    def _apply_user_settings_with_fallbacks(self):
+        """Apply user settings using the same three-tier fallback system as usersetting.py"""
+        user_dict = getattr(self, 'user_dict', {})
+        
+        LOGGER.info("=== APPLYING USER SETTINGS WITH FALLBACKS ===")
+        LOGGER.info(f"Raw user_dict: {user_dict}")
+        
+        # ✅ Split size with fallback (same logic as usersetting.py)
+        if user_dict.get("split_size", False):
+            self.split_size = user_dict["split_size"]
+            LOGGER.info(f"Split size from user_dict: {self.split_size}")
+        else:
+            self.split_size = config_dict.get("LEECH_SPLIT_SIZE", 2097152000)
+            LOGGER.info(f"Split size from config fallback: {self.split_size}")
+        
+        # ✅ Upload as document with fallback
+        if (user_dict.get("as_doc", False) or 
+            "as_doc" not in user_dict and config_dict.get("AS_DOCUMENT", True)):
+            self.as_doc = True
+        else:
+            self.as_doc = False
+        LOGGER.info(f"Upload as document: {self.as_doc}")
+        
+        # ✅ Leech destination with fallback
+        if user_dict.get("leech_dest", False):
+            self.leech_dest = user_dict["leech_dest"]
+        elif "leech_dest" not in user_dict and config_dict.get("LEECH_DUMP_CHAT"):
+            self.leech_dest = config_dict["LEECH_DUMP_CHAT"]
+        else:
+            self.leech_dest = None
+        LOGGER.info(f"Leech destination: {self.leech_dest}")
+        
+        # ✅ Media group with fallback
+        if (user_dict.get("media_group", False) or 
+            "media_group" not in user_dict and config_dict.get("MEDIA_GROUP", False)):
+            self.media_group = True
+        else:
+            self.media_group = False
+        LOGGER.info(f"Media group: {self.media_group}")
+        
+        # ✅ Equal splits with fallback
+        if (user_dict.get("equal_splits", False) or 
+            "equal_splits" not in user_dict and config_dict.get("EQUAL_SPLITS", False)):
+            self.equal_splits = True
+        else:
+            self.equal_splits = False
+        LOGGER.info(f"Equal splits: {self.equal_splits}")
+        
+        # ✅ Thumbnail with fallback
+        thumbpath = f"Thumbnails/{self.user_id}.jpg"
+        self.thumb = user_dict.get("thumb") or thumbpath
+        LOGGER.info(f"Thumbnail path: {self.thumb}")
+        
+        # ✅ Leech prefix with fallback
+        if user_dict.get("lprefix", False):
+            self.lprefix = user_dict["lprefix"]
+        elif "lprefix" not in user_dict and config_dict.get("LEECH_FILENAME_PREFIX"):
+            self.lprefix = config_dict["LEECH_FILENAME_PREFIX"]
+        else:
+            self.lprefix = None
+        LOGGER.info(f"Leech prefix: {self.lprefix}")
+        
+        # ✅ Force leech mode and ensure proper upload destination
+        self.is_leech = True
+        self.up_dest = self.leech_dest  # Set upload destination
+        
+        LOGGER.info("=== USER SETTINGS APPLIED WITH FALLBACKS ===")
 
     async def new_event(self):
         """Main channel leech event handler"""
@@ -88,7 +154,7 @@ class ChannelLeech(TaskListener):
                 "**Features:**\n"
                 "• Files uploaded with caption first line as filename (emoji-free)\n"
                 "• Use `--no-caption` to keep original filenames\n"
-                "• Upload respects all your user settings automatically"
+                "• Respects all your user settings with proper fallbacks"
             )
             await send_message(self.message, usage_text)
             return
@@ -113,8 +179,10 @@ class ChannelLeech(TaskListener):
             self.message, 
             f"🔄 **Starting channel leech** `{str(self.mid)[:12]}`\n"
             f"📋 **Channel:** `{self.channel_id}`{filter_text}\n"
-            f"📤 **Upload:** Telegram (TaskListener pipeline)\n"
+            f"📤 **Upload:** TaskListener Pipeline (Fallback System)\n"
             f"📝 **Filename mode:** {caption_mode}\n"
+            f"⚙️ **Split size:** {self.split_size} bytes\n"
+            f"📄 **As document:** {self.as_doc}\n"
             f"⏹️ **Cancel with:** `/cancel {str(self.mid)[:12]}`"
         )
 
@@ -145,7 +213,7 @@ class ChannelLeech(TaskListener):
                 self.status_message, 
                 f"📋 Processing channel: **{chat.title}**\n"
                 f"🔍 Scanning messages...\n"
-                f"📤 Upload: **TaskListener Pipeline** {caption_info}"
+                f"📤 Upload: **Fallback System Active** {caption_info}"
             )
 
             scanner = ChannelScanner(user, self.channel_id, filter_tags=self.filter_tags)
@@ -212,7 +280,7 @@ class ChannelLeech(TaskListener):
                         f"⬇️ Downloaded: {downloaded}\n"
                         f"⏭️ Skipped: {skipped}\n"
                         f"❌ Errors: {errors}\n"
-                        f"📤 Using: TaskListener Pipeline"
+                        f"📤 Using: Fallback System"
                     )
                     await edit_message(self.status_message, status_text)
                     
@@ -227,7 +295,7 @@ class ChannelLeech(TaskListener):
                 f"⏭️ **Skipped (duplicates):** {skipped}\n"
                 f"❌ **Errors:** {errors}\n\n"
                 f"🎯 **Channel:** `{self.channel_id}`\n"
-                f"📤 **Pipeline:** TaskListener + TelegramUploader"
+                f"📤 **System:** Three-Tier Fallback Applied"
             )
             await edit_message(self.status_message, final_text)
 
@@ -241,7 +309,7 @@ class ChannelLeech(TaskListener):
             await self.on_download_error(f"Channel processing error: {str(e)}")
 
     async def _download_file_tasklistener_pipeline(self, message, file_info):
-        """Download file and let TaskListener handle upload with proper user settings"""
+        """Download file with proper TaskListener pipeline integration"""
         download_path = f"{DOWNLOAD_DIR}{self.mid}/"
         
         # ✅ Process caption-based filename BEFORE download
@@ -263,15 +331,16 @@ class ChannelLeech(TaskListener):
         # ✅ Create download directory
         os.makedirs(download_path, exist_ok=True)
         
-        # ✅ Verify leech mode is still set (critical for TaskListener pipeline)
-        self.is_leech = True
+        # ✅ Verify settings are still applied
+        LOGGER.info(f"Pipeline settings check:")
+        LOGGER.info(f"  is_leech: {self.is_leech}")
+        LOGGER.info(f"  split_size: {self.split_size}")
+        LOGGER.info(f"  as_doc: {getattr(self, 'as_doc', 'NOT_SET')}")
+        LOGGER.info(f"  leech_dest: {getattr(self, 'leech_dest', 'NOT_SET')}")
         
-        LOGGER.info(f"Starting TaskListener pipeline for: {file_info['file_name']}")
-        LOGGER.info(f"User settings available: {bool(getattr(self, 'user_dict', None))}")
-        
-        # ✅ Use TelegramDownloadHelper - it integrates with TaskListener pipeline
+        # ✅ Use TelegramDownloadHelper - integrates with TaskListener pipeline
         # When download completes, TaskListener will automatically call:
-        # on_download_complete() → TelegramUploader(self, up_dir) → applies user_dict settings
+        # on_download_complete() → TelegramUploader(self, up_dir) → applies user_dict + fallbacks
         telegram_helper = TelegramDownloadHelper(self)
         await telegram_helper.add_download(message, download_path, "user")
 
@@ -366,7 +435,7 @@ async def channel_scan(client, message):
 
 @new_task
 async def channel_leech_cmd(client, message):
-    """Handle /cleech command - uses TaskListener pipeline with user settings"""
+    """Handle /cleech command - uses three-tier fallback system"""
     await ChannelLeech(client, message).new_event()
 
 # Register handlers
