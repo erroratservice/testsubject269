@@ -13,7 +13,7 @@ from ..helper.listeners.task_listener import TaskListener
 
 class ChannelLeech(TaskListener):
     def __init__(self, client, message):
-        super().__init__()
+        # Set attributes BEFORE calling super().__init__()
         self.client = client
         self.message = message
         self.channel_id = None
@@ -21,11 +21,14 @@ class ChannelLeech(TaskListener):
         self.status_message = None
         self.operation_key = None
         
+        # Now call parent constructor
+        super().__init__()
+
     async def new_event(self):
         """Main channel leech event handler"""
         text = self.message.text.split()
         args = self._parse_arguments(text[1:])
-        
+
         if 'channel' not in args:
             usage_text = (
                 "**Usage:** `/cleech -ch <channel_id> [-f filter_text]`\n\n"
@@ -89,7 +92,7 @@ class ChannelLeech(TaskListener):
                     break
 
                 processed += 1
-                
+
                 # Update operation stats
                 await channel_status.update_operation(
                     self.operation_key, processed=processed
@@ -100,7 +103,7 @@ class ChannelLeech(TaskListener):
                 if not file_info:
                     continue
 
-                # Apply filter
+                # Apply filter (change to 'any' for OR logic instead of 'all' for AND logic)
                 if self.filter_tags:
                     search_text = file_info['search_text'].lower()
                     if not all(tag.lower() in search_text for tag in self.filter_tags):
@@ -124,16 +127,16 @@ class ChannelLeech(TaskListener):
                 try:
                     await self._download_file(message, file_info)
                     downloaded += 1
-                    
+
                     # Add to database after successful download
                     await database.add_file_entry(
                         self.channel_id, message.id, file_info
                     )
-                    
+
                     await channel_status.update_operation(
                         self.operation_key, downloaded=downloaded
                     )
-                    
+
                 except Exception as e:
                     errors += 1
                     LOGGER.error(f"Download failed for {file_info['file_name']}: {e}")
