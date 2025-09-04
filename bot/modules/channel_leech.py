@@ -2,7 +2,6 @@ from pyrogram.filters import command
 from pyrogram.handlers import MessageHandler
 from pyrogram.errors import FloodWait
 from copy import deepcopy
-from aiofiles.os import path as aiopath
 import asyncio
 import os
 import re
@@ -75,7 +74,7 @@ class ChannelLeech(TaskListener):
         # Now call parent constructor - this loads user_dict properly
         super().__init__()
         
-        # ✅ Apply user settings with proper three-tier fallback system
+        # Apply user settings with proper three-tier fallback system
         self._apply_user_settings_with_fallbacks()
 
     def _apply_user_settings_with_fallbacks(self):
@@ -83,65 +82,65 @@ class ChannelLeech(TaskListener):
         user_dict = getattr(self, 'user_dict', {})
         
         LOGGER.info("=== DEBUG: APPLYING USER SETTINGS WITH FALLBACKS ===")
-        LOGGER.info(f"Raw user_dict: {user_dict}")
-        LOGGER.info(f"DB Sync Mode: {'ENABLED' if self.sync_db else 'DISABLED (Testing)'}")
+        LOGGER.info("Raw user_dict: %s", user_dict)
+        LOGGER.info("DB Sync Mode: %s", 'ENABLED' if self.sync_db else 'DISABLED (Testing)')
         
-        # ✅ Split size with fallback (same logic as usersetting.py)
+        # Split size with fallback (same logic as usersetting.py)
         if user_dict.get("split_size", False):
             self.split_size = user_dict["split_size"]
-            LOGGER.info(f"Split size from user_dict: {self.split_size}")
+            LOGGER.info("Split size from user_dict: %s", self.split_size)
         else:
             self.split_size = config_dict.get("LEECH_SPLIT_SIZE", 2097152000)
-            LOGGER.info(f"Split size from config fallback: {self.split_size}")
+            LOGGER.info("Split size from config fallback: %s", self.split_size)
         
-        # ✅ Upload as document with fallback
+        # Upload as document with fallback
         if (user_dict.get("as_doc", False) or 
             "as_doc" not in user_dict and config_dict.get("AS_DOCUMENT", True)):
             self.as_doc = True
         else:
             self.as_doc = False
-        LOGGER.info(f"Upload as document: {self.as_doc}")
+        LOGGER.info("Upload as document: %s", self.as_doc)
         
-        # ✅ Leech destination with fallback
+        # Leech destination with fallback
         if user_dict.get("leech_dest", False):
             self.leech_dest = user_dict["leech_dest"]
         elif "leech_dest" not in user_dict and config_dict.get("LEECH_DUMP_CHAT"):
             self.leech_dest = config_dict["LEECH_DUMP_CHAT"]
         else:
             self.leech_dest = None
-        LOGGER.info(f"Leech destination: {self.leech_dest}")
+        LOGGER.info("Leech destination: %s", self.leech_dest)
         
-        # ✅ Media group with fallback
+        # Media group with fallback
         if (user_dict.get("media_group", False) or 
             "media_group" not in user_dict and config_dict.get("MEDIA_GROUP", False)):
             self.media_group = True
         else:
             self.media_group = False
-        LOGGER.info(f"Media group: {self.media_group}")
+        LOGGER.info("Media group: %s", self.media_group)
         
-        # ✅ Equal splits with fallback
+        # Equal splits with fallback
         if (user_dict.get("equal_splits", False) or 
             "equal_splits" not in user_dict and config_dict.get("EQUAL_SPLITS", False)):
             self.equal_splits = True
         else:
             self.equal_splits = False
-        LOGGER.info(f"Equal splits: {self.equal_splits}")
+        LOGGER.info("Equal splits: %s", self.equal_splits)
         
-        # ✅ Thumbnail with fallback
+        # Thumbnail with fallback
         thumbpath = f"Thumbnails/{self.user_id}.jpg"
         self.thumb = user_dict.get("thumb") or thumbpath
-        LOGGER.info(f"Thumbnail path: {self.thumb}")
+        LOGGER.info("Thumbnail path: %s", self.thumb)
         
-        # ✅ Leech prefix with fallback
+        # Leech prefix with fallback
         if user_dict.get("lprefix", False):
             self.lprefix = user_dict["lprefix"]
         elif "lprefix" not in user_dict and config_dict.get("LEECH_FILENAME_PREFIX"):
             self.lprefix = config_dict["LEECH_FILENAME_PREFIX"]
         else:
             self.lprefix = None
-        LOGGER.info(f"Leech prefix: {self.lprefix}")
+        LOGGER.info("Leech prefix: %s", self.lprefix)
         
-        # ✅ Force leech mode and ensure proper upload destination
+        # Force leech mode and ensure proper upload destination
         self.is_leech = True
         self.up_dest = self.leech_dest
         
@@ -173,13 +172,13 @@ class ChannelLeech(TaskListener):
         self.filter_tags = args.get('filter', [])
         self.use_caption_as_filename = not args.get('no_caption', False)
         
-        # ✅ Check for test flag in arguments
+        # Check for test flag in arguments
         if args.get('test', False):
             self.sync_db = False
             LOGGER.info("TEST MODE: Database syncing DISABLED")
 
         if not user:
-            await send_message(self.message, "❌ User session is required for channel access!")
+            await send_message(self.message, "User session is required for channel access!")
             return
 
         # Start operation tracking
@@ -207,8 +206,8 @@ class ChannelLeech(TaskListener):
         try:
             await self._process_channel()
         except Exception as e:
-            LOGGER.error(f"❌ Channel leech error: {e}")
-            await edit_message(self.status_message, f"❌ Error: {str(e)}")
+            LOGGER.error("Channel leech error: %s", e)
+            await edit_message(self.status_message, f"Error: {str(e)}")
         finally:
             if self.operation_key:
                 await channel_status.stop_operation(self.operation_key)
@@ -237,38 +236,38 @@ class ChannelLeech(TaskListener):
 
             async for message in user.get_chat_history(self.channel_id):
                 if self.is_cancelled:
-                    LOGGER.info("❌ Channel leech cancelled by user")
+                    LOGGER.info("Channel leech cancelled by user")
                     break
 
                 processed += 1
                 batch_count += 1
                 self.batch_counter += 1
 
-                LOGGER.info(f"BATCH #{self.batch_counter}: Starting processing message {message.id}")
+                LOGGER.info("[BATCH] #%s: Starting processing message %s", self.batch_counter, message.id)
 
                 await channel_status.update_operation(
                     self.operation_key, processed=processed
                 )
 
                 try:
-                    # ✅ Create completely isolated scanner for THIS message only
+                    # Create completely isolated scanner for THIS message only
                     isolated_scanner = ChannelScanner(user, self.channel_id, filter_tags=self.filter_tags)
                     isolated_file_info = await isolated_scanner._extract_file_info(message)
                     
                     if not isolated_file_info:
-                        LOGGER.info(f"MSG_{message.id}: No file info, skipping")
+                        LOGGER.info("[SKIP] MSG_%s: No file info, skipping", message.id)
                         continue
 
-                    LOGGER.info(f"MSG_{message.id}: File info extracted - {isolated_file_info.get('file_name', 'unknown')}")
+                    LOGGER.info("[FILE] MSG_%s: File info extracted - %s", message.id, isolated_file_info.get('file_name', 'unknown'))
 
                     # Apply filters to THIS message only
                     if self.filter_tags:
                         search_text = isolated_file_info['search_text'].lower()
                         if not all(tag.lower() in search_text for tag in self.filter_tags):
-                            LOGGER.info(f"MSG_{message.id}: Failed filter check, skipping")
+                            LOGGER.info("[FILTER] MSG_%s: Failed filter check, skipping", message.id)
                             continue
 
-                    # ✅ Check duplicates ONLY if database sync is enabled
+                    # Check duplicates ONLY if database sync is enabled
                     if self.sync_db:
                         exists = await database.check_file_exists(
                             isolated_file_info.get('file_unique_id'),
@@ -277,31 +276,31 @@ class ChannelLeech(TaskListener):
                         )
 
                         if exists:
-                            LOGGER.info(f"MSG_{message.id}: Duplicate file, skipping")
+                            LOGGER.info("[DUPLICATE] MSG_%s: Duplicate file, skipping", message.id)
                             skipped += 1
                             await channel_status.update_operation(
                                 self.operation_key, skipped=skipped
                             )
                             continue
                     else:
-                        LOGGER.info(f"MSG_{message.id}: TESTING MODE - Skipping duplicate check")
+                        LOGGER.info("[TEST] MSG_%s: TESTING MODE - Skipping duplicate check", message.id)
 
-                    LOGGER.info(f"MSG_{message.id}: Starting isolated processing")
+                    LOGGER.info("[PROCESS] MSG_%s: Starting isolated processing", message.id)
 
-                    # ✅ Process THIS message with completely isolated state
+                    # Process THIS message with completely isolated state
                     await self._download_file_with_complete_isolation(message, isolated_file_info)
                     
                     downloaded += 1
-                    LOGGER.info(f"MSG_{message.id}: Completed isolated processing")
+                    LOGGER.info("[SUCCESS] MSG_%s: Completed isolated processing", message.id)
 
-                    # ✅ Add to database ONLY if sync is enabled
+                    # Add to database ONLY if sync is enabled
                     if self.sync_db:
                         await database.add_file_entry(
                             self.channel_id, message.id, isolated_file_info
                         )
-                        LOGGER.info(f"MSG_{message.id}: Added to database")
+                        LOGGER.info("[DATABASE] MSG_%s: Added to database", message.id)
                     else:
-                        LOGGER.info(f"MSG_{message.id}: TESTING MODE - Skipped database entry")
+                        LOGGER.info("[TEST] MSG_%s: TESTING MODE - Skipped database entry", message.id)
 
                     await channel_status.update_operation(
                         self.operation_key, downloaded=downloaded
@@ -309,12 +308,12 @@ class ChannelLeech(TaskListener):
 
                 except Exception as e:
                     errors += 1
-                    LOGGER.error(f"❌ MSG_{message.id}: Processing failed: {e}")
+                    LOGGER.error("[ERROR] MSG_%s: Processing failed: %s", message.id, e)
                     await channel_status.update_operation(
                         self.operation_key, errors=errors
                     )
 
-                # ✅ Critical: Sleep between messages to prevent state bleeding
+                # Critical: Sleep between messages to prevent state bleeding
                 await asyncio.sleep(message_sleep)
 
                 if batch_count >= 10:
@@ -329,7 +328,7 @@ class ChannelLeech(TaskListener):
                     )
                     await edit_message(self.status_message, status_text)
                     
-                    LOGGER.info(f"Batch completed ({batch_count} messages), sleeping for {batch_sleep}s")
+                    LOGGER.info("[BATCH] Completed (%s messages), sleeping for %s seconds", batch_count, batch_sleep)
                     await asyncio.sleep(batch_sleep)
                     batch_count = 0
 
@@ -346,7 +345,7 @@ class ChannelLeech(TaskListener):
             await edit_message(self.status_message, final_text)
 
         except FloodWait as e:
-            LOGGER.warning(f"FloodWait during channel processing: {e.x}s")
+            LOGGER.warning("FloodWait during channel processing: %s seconds", e.x)
             await edit_message(self.status_message, f"Rate limited, waiting {e.x} seconds...")
             await asyncio.sleep(e.x + 1)
             LOGGER.info("Resuming channel processing after FloodWait")
@@ -358,21 +357,21 @@ class ChannelLeech(TaskListener):
         """Download file with complete state isolation - TAG PARAMETER REMOVED FOR TESTING"""
         download_path = f"{DOWNLOAD_DIR}{self.mid}/"
         
-        LOGGER.info(f"MSG_{message.id}: === STARTING COMPLETE ISOLATION ===")
+        LOGGER.info("[ISOLATION] MSG_%s: === STARTING COMPLETE ISOLATION ===", message.id)
         
-        # ✅ Create completely isolated copy of file_info for THIS file only
+        # Create completely isolated copy of file_info for THIS file only
         isolated_file_info = deepcopy(file_info)
-        LOGGER.info(f"MSG_{message.id}: Created isolated file_info copy")
+        LOGGER.info("[COPY] MSG_%s: Created isolated file_info copy", message.id)
         
-        # ✅ Generate unique filename using message-specific data only
+        # Generate unique filename using message-specific data only
         if self.use_caption_as_filename and hasattr(message, 'caption') and message.caption:
             first_line = message.caption.split('\n')[0].strip()
-            LOGGER.info(f"MSG_{message.id}: Caption first line: '{first_line}'")
+            LOGGER.info("[CAPTION] MSG_%s: Caption first line: %s", message.id, first_line)
             
             if first_line and len(first_line) >= 3:
                 # Start completely fresh for THIS message
                 clean_name = sanitize_filename(first_line)
-                LOGGER.info(f":"MSG_{message.id}: Cleaned caption: '{clean_name}'")
+                LOGGER.info("[CLEAN] MSG_%s: Cleaned caption: %s", message.id, clean_name)
                 
                 if clean_name and len(clean_name) >= 3:
                     # Get extension from THIS file only
@@ -384,65 +383,65 @@ class ChannelLeech(TaskListener):
                     # Update ONLY the isolated copy
                     isolated_file_info['file_name'] = unique_filename
                     
-                    LOGGER.info(f"MSG_{message.id}: Isolated filename: '{file_info['file_name']}' → '{unique_filename}'")
+                    LOGGER.info("[FILENAME] MSG_%s: Isolated filename: %s -> %s", message.id, file_info['file_name'], unique_filename)
                 else:
                     # Clean name too short, use original filename with unique suffix
                     base_name = os.path.splitext(isolated_file_info['file_name'])[0]
                     extension = os.path.splitext(isolated_file_info['file_name'])[1]
                     isolated_file_info['file_name'] = f"{base_name}_{message.id}{extension}"
-                    LOGGER.info(f"MSG_{message.id}: Caption too short, using original with suffix: {isolated_file_info['file_name']}")
+                    LOGGER.info("[FILENAME] MSG_%s: Caption too short, using original with suffix: %s", message.id, isolated_file_info['file_name'])
             else:
                 # Caption too short, use original with unique ID
                 base_name = os.path.splitext(isolated_file_info['file_name'])[0]
                 extension = os.path.splitext(isolated_file_info['file_name'])[1]
                 isolated_file_info['file_name'] = f"{base_name}_{message.id}{extension}"
-                LOGGER.info(f"MSG_{message.id}: Empty caption, using original with suffix: {isolated_file_info['file_name']}")
+                LOGGER.info("[FILENAME] MSG_%s: Empty caption, using original with suffix: %s", message.id, isolated_file_info['file_name'])
         else:
             # No caption mode - use original filename with unique ID
             base_name = os.path.splitext(isolated_file_info['file_name'])[0]
             extension = os.path.splitext(isolated_file_info['file_name'])[1]
             isolated_file_info['file_name'] = f"{base_name}_{message.id}{extension}"
-            LOGGER.info(f"MSG_{message.id}: No caption mode, using original with suffix: {isolated_file_info['file_name']}")
+            LOGGER.info("[FILENAME] MSG_%s: No caption mode, using original with suffix: %s", message.id, isolated_file_info['file_name'])
         
-        # ✅ Create download directory
+        # Create download directory
         os.makedirs(download_path, exist_ok=True)
         
-        # ✅ Log this specific file's processing with complete context
-        LOGGER.info(f"📊 MSG_{message.id}: ISOLATION CONTEXT:")
-        LOGGER.info(f"    Final filename: {isolated_file_info['file_name']}")
-        LOGGER.info(f"    File size: {isolated_file_info.get('file_size', 'unknown')}")
-        LOGGER.info(f"    is_leech: {self.is_leech}")
-        LOGGER.info(f"    split_size: {self.split_size}")
-        LOGGER.info(f"    as_doc: {self.as_doc}")
-        LOGGER.info(f"    leech_dest: {self.leech_dest}")
-        LOGGER.info(f"    sync_db: {self.sync_db}")
+        # Log this specific file's processing with complete context
+        LOGGER.info("[CONTEXT] MSG_%s: ISOLATION CONTEXT:", message.id)
+        LOGGER.info("    [FILE] Final filename: %s", isolated_file_info['file_name'])
+        LOGGER.info("    [SIZE] File size: %s", isolated_file_info.get('file_size', 'unknown'))
+        LOGGER.info("    [LEECH] is_leech: %s", self.is_leech)
+        LOGGER.info("    [SPLIT] split_size: %s", self.split_size)
+        LOGGER.info("    [DOC] as_doc: %s", self.as_doc)
+        LOGGER.info("    [DEST] leech_dest: %s", self.leech_dest)
+        LOGGER.info("    [TEST] sync_db: %s", self.sync_db)
         
-        # ✅ Create completely isolated download helper instance
+        # Create completely isolated download helper instance
         telegram_helper = TelegramDownloadHelper(self)
         
-        # ✅ Process with isolated file info - TAG PARAMETER REMOVED FOR TESTING
+        # Process with isolated file info - TAG PARAMETER REMOVED FOR TESTING
         try:
-            LOGGER.info(f"MSG_{message.id}: Starting download with isolated context (NO TAG)")
+            LOGGER.info("[DOWNLOAD] MSG_%s: Starting download with isolated context (NO TAG)", message.id)
             
             # Temporarily update the original file_info for download processing
             original_filename = file_info['file_name']
             file_info['file_name'] = isolated_file_info['file_name']
             
-            # ✅ REMOVED TAG PARAMETER TO FIX TESTING ERRORS
+            # REMOVED TAG PARAMETER TO FIX TESTING ERRORS
             await telegram_helper.add_download(
                 message=message,
                 path=download_path
             )
             
-            LOGGER.info(f"✅ MSG_{message.id}: Download completed successfully with isolated filename: {isolated_file_info['file_name']}")
+            LOGGER.info("[SUCCESS] MSG_%s: Download completed successfully with isolated filename: %s", message.id, isolated_file_info['file_name'])
             
         except Exception as e:
-            LOGGER.error(f"❌ MSG_{message.id}: Download failed: {e}")
+            LOGGER.error("[ERROR] MSG_%s: Download failed: %s", message.id, e)
             raise
         finally:
             # Restore original filename to prevent affecting other operations
             file_info['file_name'] = original_filename
-            LOGGER.info(f"MSG_{message.id}: Restored original filename for safety")
+            LOGGER.info("[RESTORE] MSG_%s: Restored original filename for safety", message.id)
 
     def _parse_arguments(self, args):
         """Parse command arguments including --test flag for disabling DB sync"""
@@ -473,7 +472,7 @@ class ChannelLeech(TaskListener):
     def cancel_task(self):
         """Cancel the channel leech task"""
         self.is_cancelled = True
-        LOGGER.info(f"❌ Channel leech task cancelled for {self.channel_id}")
+        LOGGER.info("Channel leech task cancelled for %s", self.channel_id)
 
 @new_task
 async def channel_leech_cmd(client, message):
