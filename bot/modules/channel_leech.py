@@ -184,7 +184,7 @@ class ChannelLeech(TaskListener):
 
         # Start operation tracking
         self.operation_key = await channel_status.start_operation(
-            self.message.from_user.id, self.channel_id, "channel_leech_debug"
+            self.message.from_user.id, self.channel_id, "channel_leech_testing"
         )
 
         filter_text = f" with filter: {' '.join(self.filter_tags)}" if self.filter_tags else ""
@@ -193,9 +193,9 @@ class ChannelLeech(TaskListener):
         
         self.status_message = await send_message(
             self.message, 
-            f"🔄 **DEBUG: Starting channel leech** `{str(self.mid)[:12]}`{test_mode}\n"
+            f"🔄 **TESTING: Starting channel leech** `{str(self.mid)[:12]}`{test_mode}\n"
             f"📋 **Channel:** `{self.channel_id}`{filter_text}\n"
-            f"📤 **Upload:** Enhanced Debug Mode\n"
+            f"📤 **Upload:** TaskListener Pipeline (No Tag)\n"
             f"📝 **Filename mode:** {caption_mode}\n"
             f"⚙️ **Split size:** {self.split_size} bytes\n"
             f"📄 **As document:** {self.as_doc}\n"
@@ -221,7 +221,7 @@ class ChannelLeech(TaskListener):
         errors = 0
         batch_count = 0
         batch_sleep = 3
-        message_sleep = 0.5  # Increased to prevent state bleeding
+        message_sleep = 0.5
 
         try:
             chat = await user.get_chat(self.channel_id)
@@ -232,7 +232,7 @@ class ChannelLeech(TaskListener):
                 self.status_message, 
                 f"📋 Processing channel: **{chat.title}**\n"
                 f"🔍 Scanning messages...\n"
-                f"📤 Upload: **DEBUG MODE - {db_mode}** {caption_info}"
+                f"📤 Upload: **TESTING MODE - {db_mode}** {caption_info}"
             )
 
             async for message in user.get_chat_history(self.channel_id):
@@ -319,13 +319,13 @@ class ChannelLeech(TaskListener):
 
                 if batch_count >= 10:
                     status_text = (
-                        f"📊 **DEBUG Progress Update**\n"
+                        f"📊 **TESTING Progress Update**\n"
                         f"📋 Processed: {processed}\n"
                         f"⬇️ Downloaded: {downloaded}\n"
                         f"⏭️ Skipped: {skipped}\n"
                         f"❌ Errors: {errors}\n"
                         f"🧪 DB Sync: {'DISABLED' if not self.sync_db else 'ENABLED'}\n"
-                        f"🔧 Using: State Isolation Debug Mode"
+                        f"🔧 Using: No Tag Parameter (Testing)"
                     )
                     await edit_message(self.status_message, status_text)
                     
@@ -334,14 +334,14 @@ class ChannelLeech(TaskListener):
                     batch_count = 0
 
             final_text = (
-                f"✅ **DEBUG: Channel leech completed!**\n\n"
+                f"✅ **TESTING: Channel leech completed!**\n\n"
                 f"📋 **Total processed:** {processed}\n"
                 f"⬇️ **Downloaded:** {downloaded}\n"
                 f"⏭️ **Skipped (duplicates):** {skipped}\n"
                 f"❌ **Errors:** {errors}\n\n"
                 f"🎯 **Channel:** `{self.channel_id}`\n"
                 f"🧪 **DB Sync:** {'DISABLED (Testing)' if not self.sync_db else 'ENABLED'}\n"
-                f"🔧 **System:** Complete State Isolation Applied"
+                f"🔧 **System:** No Tag Parameter Applied"
             )
             await edit_message(self.status_message, final_text)
 
@@ -355,7 +355,7 @@ class ChannelLeech(TaskListener):
             await self.on_download_error(f"Channel processing error: {str(e)}")
 
     async def _download_file_with_complete_isolation(self, message, file_info):
-        """Download file with complete state isolation and enhanced debugging"""
+        """Download file with complete state isolation - TAG PARAMETER REMOVED FOR TESTING"""
         download_path = f"{DOWNLOAD_DIR}{self.mid}/"
         
         LOGGER.info(f"🚀 MSG_{message.id}: === STARTING COMPLETE ISOLATION ===")
@@ -372,7 +372,7 @@ class ChannelLeech(TaskListener):
             if first_line and len(first_line) >= 3:
                 # Start completely fresh for THIS message
                 clean_name = sanitize_filename(first_line)
-                LOGGER.info(f"🧹 MSG_{message.id}: Cleaned caption: '{clean_name}'")
+                LOGGER.info(f":"🧹 MSG_{message.id}: Cleaned caption: '{clean_name}'")
                 
                 if clean_name and len(clean_name) >= 3:
                     # Get extension from THIS file only
@@ -420,18 +420,18 @@ class ChannelLeech(TaskListener):
         # ✅ Create completely isolated download helper instance
         telegram_helper = TelegramDownloadHelper(self)
         
-        # ✅ Process with isolated file info - no shared references
+        # ✅ Process with isolated file info - TAG PARAMETER REMOVED FOR TESTING
         try:
-            LOGGER.info(f"📥 MSG_{message.id}: Starting download with isolated context")
+            LOGGER.info(f"📥 MSG_{message.id}: Starting download with isolated context (NO TAG)")
             
             # Temporarily update the original file_info for download processing
             original_filename = file_info['file_name']
             file_info['file_name'] = isolated_file_info['file_name']
             
+            # ✅ REMOVED TAG PARAMETER TO FIX TESTING ERRORS
             await telegram_helper.add_download(
                 message=message,
-                path=download_path, 
-                tag=f"user_isolated_{message.id}"
+                path=download_path
             )
             
             LOGGER.info(f"✅ MSG_{message.id}: Download completed successfully with isolated filename: {isolated_file_info['file_name']}")
@@ -477,7 +477,7 @@ class ChannelLeech(TaskListener):
 
 @new_task
 async def channel_leech_cmd(client, message):
-    """Handle /cleech command - ENHANCED DEBUG VERSION with optional DB sync disable"""
+    """Handle /cleech command - TESTING VERSION with tag parameter removed"""
     # Check if --test flag is in the command to disable DB sync
     test_mode = '--test' in message.text
     await ChannelLeech(client, message, sync_db=not test_mode).new_event()
