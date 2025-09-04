@@ -16,6 +16,11 @@ from pyrogram.handlers import MessageHandler
 from signal import signal, SIGINT
 from sys import executable
 from time import time
+import pyrogram.utils as pyroutils
+
+# Fix for new Telegram peer ID formats
+pyroutils.MIN_CHAT_ID = -999999999999
+pyroutils.MIN_CHANNEL_ID = -100999999999999
 
 from bot import (
     bot,
