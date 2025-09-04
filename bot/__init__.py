@@ -25,6 +25,11 @@ from subprocess import Popen, run
 from time import time
 from tzlocal import get_localzone
 from uvloop import install
+import pyrogram.utils as pyroutils
+
+# Fix for new Telegram peer ID formats
+pyroutils.MIN_CHAT_ID = -999999999999
+pyroutils.MIN_CHANNEL_ID = -100999999999999
 
 # from faulthandler import enable as faulthandler_enable
 # faulthandler_enable()
