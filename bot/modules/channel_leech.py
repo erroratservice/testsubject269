@@ -48,7 +48,7 @@ def sanitize_filename(filename):
     return filename
 
 class ChannelLeech(TaskListener):
-    def __init__(self, client, message):
+    def __init__(self, client, message, sync_db=True):
         # Set attributes BEFORE calling super().__init__()
         self.client = client
         self.message = message
@@ -58,6 +58,9 @@ class ChannelLeech(TaskListener):
         self.operation_key = None
         self.use_caption_as_filename = True
         self.batch_counter = 0
+        
+        # ✅ TESTING FLAG: Set to False to disable database syncing during testing
+        self.sync_db = sync_db
         
         # ✅ Critical: Set is_leech BEFORE calling super().__init__()
         self.is_leech = True
@@ -81,6 +84,7 @@ class ChannelLeech(TaskListener):
         
         LOGGER.info("=== DEBUG: APPLYING USER SETTINGS WITH FALLBACKS ===")
         LOGGER.info(f"🔍 Raw user_dict: {user_dict}")
+        LOGGER.info(f"🧪 DB Sync Mode: {'ENABLED' if self.sync_db else 'DISABLED (Testing)'}")
         
         # ✅ Split size with fallback (same logic as usersetting.py)
         if user_dict.get("split_size", False):
@@ -150,15 +154,17 @@ class ChannelLeech(TaskListener):
 
         if 'channel' not in args:
             usage_text = (
-                "**Usage:** `/cleech -ch <channel_id> [-f filter_text] [--no-caption]`\n\n"
+                "**Usage:** `/cleech -ch <channel_id> [-f filter_text] [--no-caption] [--test]`\n\n"
                 "**Examples:**\n"
                 "`/cleech -ch @movies_channel`\n"
                 "`/cleech -ch @movies_channel -f 2024 BluRay`\n"
-                "`/cleech -ch -1001234567890 -f movie --no-caption`\n\n"
+                "`/cleech -ch -1001234567890 -f movie --no-caption`\n"
+                "`/cleech -ch @movies_channel --test` (testing mode - no DB sync)\n\n"
                 "**Features:**\n"
                 "• Enhanced debugging enabled\n"
                 "• Complete state isolation per file\n"
-                "• Unique filename generation with message ID"
+                "• Unique filename generation with message ID\n"
+                "• `--test` flag disables database syncing for repeated testing"
             )
             await send_message(self.message, usage_text)
             return
@@ -166,6 +172,11 @@ class ChannelLeech(TaskListener):
         self.channel_id = args['channel']
         self.filter_tags = args.get('filter', [])
         self.use_caption_as_filename = not args.get('no_caption', False)
+        
+        # ✅ Check for test flag in arguments
+        if args.get('test', False):
+            self.sync_db = False
+            LOGGER.info("🧪 TEST MODE: Database syncing DISABLED")
 
         if not user:
             await send_message(self.message, "❌ User session is required for channel access!")
@@ -178,16 +189,18 @@ class ChannelLeech(TaskListener):
 
         filter_text = f" with filter: {' '.join(self.filter_tags)}" if self.filter_tags else ""
         caption_mode = "caption as filename" if self.use_caption_as_filename else "original filenames"
+        test_mode = " [TEST MODE - NO DB SYNC]" if not self.sync_db else ""
         
         self.status_message = await send_message(
             self.message, 
-            f"🔄 **DEBUG: Starting channel leech** `{str(self.mid)[:12]}`\n"
+            f"🔄 **DEBUG: Starting channel leech** `{str(self.mid)[:12]}`{test_mode}\n"
             f"📋 **Channel:** `{self.channel_id}`{filter_text}\n"
             f"📤 **Upload:** Enhanced Debug Mode\n"
             f"📝 **Filename mode:** {caption_mode}\n"
             f"⚙️ **Split size:** {self.split_size} bytes\n"
             f"📄 **As document:** {self.as_doc}\n"
             f"🎯 **Destination:** {self.leech_dest}\n"
+            f"🧪 **DB Sync:** {'DISABLED' if not self.sync_db else 'ENABLED'}\n"
             f"⏹️ **Cancel with:** `/cancel {str(self.mid)[:12]}`"
         )
 
@@ -213,12 +226,13 @@ class ChannelLeech(TaskListener):
         try:
             chat = await user.get_chat(self.channel_id)
             caption_info = "with unique caption filenames + msgID" if self.use_caption_as_filename else "with original filenames + msgID"
+            db_mode = "DB SYNC DISABLED" if not self.sync_db else "DB SYNC ENABLED"
             
             await edit_message(
                 self.status_message, 
                 f"📋 Processing channel: **{chat.title}**\n"
                 f"🔍 Scanning messages...\n"
-                f"📤 Upload: **DEBUG MODE - State Isolation** {caption_info}"
+                f"📤 Upload: **DEBUG MODE - {db_mode}** {caption_info}"
             )
 
             async for message in user.get_chat_history(self.channel_id):
@@ -254,20 +268,23 @@ class ChannelLeech(TaskListener):
                             LOGGER.info(f"⏭️ MSG_{message.id}: Failed filter check, skipping")
                             continue
 
-                    # Check duplicates for THIS message only
-                    exists = await database.check_file_exists(
-                        isolated_file_info.get('file_unique_id'),
-                        isolated_file_info.get('file_hash'),
-                        isolated_file_info.get('file_name')
-                    )
-
-                    if exists:
-                        LOGGER.info(f"⏭️ MSG_{message.id}: Duplicate file, skipping")
-                        skipped += 1
-                        await channel_status.update_operation(
-                            self.operation_key, skipped=skipped
+                    # ✅ Check duplicates ONLY if database sync is enabled
+                    if self.sync_db:
+                        exists = await database.check_file_exists(
+                            isolated_file_info.get('file_unique_id'),
+                            isolated_file_info.get('file_hash'),
+                            isolated_file_info.get('file_name')
                         )
-                        continue
+
+                        if exists:
+                            LOGGER.info(f"⏭️ MSG_{message.id}: Duplicate file, skipping")
+                            skipped += 1
+                            await channel_status.update_operation(
+                                self.operation_key, skipped=skipped
+                            )
+                            continue
+                    else:
+                        LOGGER.info(f"🧪 MSG_{message.id}: TESTING MODE - Skipping duplicate check")
 
                     LOGGER.info(f"🎯 MSG_{message.id}: Starting isolated processing")
 
@@ -277,9 +294,14 @@ class ChannelLeech(TaskListener):
                     downloaded += 1
                     LOGGER.info(f"✅ MSG_{message.id}: Completed isolated processing")
 
-                    await database.add_file_entry(
-                        self.channel_id, message.id, isolated_file_info
-                    )
+                    # ✅ Add to database ONLY if sync is enabled
+                    if self.sync_db:
+                        await database.add_file_entry(
+                            self.channel_id, message.id, isolated_file_info
+                        )
+                        LOGGER.info(f"💾 MSG_{message.id}: Added to database")
+                    else:
+                        LOGGER.info(f"🧪 MSG_{message.id}: TESTING MODE - Skipped database entry")
 
                     await channel_status.update_operation(
                         self.operation_key, downloaded=downloaded
@@ -302,6 +324,7 @@ class ChannelLeech(TaskListener):
                         f"⬇️ Downloaded: {downloaded}\n"
                         f"⏭️ Skipped: {skipped}\n"
                         f"❌ Errors: {errors}\n"
+                        f"🧪 DB Sync: {'DISABLED' if not self.sync_db else 'ENABLED'}\n"
                         f"🔧 Using: State Isolation Debug Mode"
                     )
                     await edit_message(self.status_message, status_text)
@@ -317,6 +340,7 @@ class ChannelLeech(TaskListener):
                 f"⏭️ **Skipped (duplicates):** {skipped}\n"
                 f"❌ **Errors:** {errors}\n\n"
                 f"🎯 **Channel:** `{self.channel_id}`\n"
+                f"🧪 **DB Sync:** {'DISABLED (Testing)' if not self.sync_db else 'ENABLED'}\n"
                 f"🔧 **System:** Complete State Isolation Applied"
             )
             await edit_message(self.status_message, final_text)
@@ -391,6 +415,7 @@ class ChannelLeech(TaskListener):
         LOGGER.info(f"    📏 split_size: {self.split_size}")
         LOGGER.info(f"    📄 as_doc: {self.as_doc}")
         LOGGER.info(f"    🎯 leech_dest: {self.leech_dest}")
+        LOGGER.info(f"    🧪 sync_db: {self.sync_db}")
         
         # ✅ Create completely isolated download helper instance
         telegram_helper = TelegramDownloadHelper(self)
@@ -420,7 +445,7 @@ class ChannelLeech(TaskListener):
             LOGGER.info(f"🔄 MSG_{message.id}: Restored original filename for safety")
 
     def _parse_arguments(self, args):
-        """Parse command arguments including new --no-caption flag"""
+        """Parse command arguments including --test flag for disabling DB sync"""
         parsed = {}
         i = 0
         
@@ -437,6 +462,9 @@ class ChannelLeech(TaskListener):
             elif args[i] == '--no-caption':
                 parsed['no_caption'] = True
                 i += 1
+            elif args[i] == '--test':
+                parsed['test'] = True
+                i += 1
             else:
                 i += 1
                 
@@ -447,78 +475,14 @@ class ChannelLeech(TaskListener):
         self.is_cancelled = True
         LOGGER.info(f"❌ Channel leech task cancelled for {self.channel_id}")
 
-class ChannelScanListener(TaskListener):
-    def __init__(self, client, message):
-        self.client = client
-        self.message = message
-        self.channel_id = None
-        self.filter_tags = []
-        self.scanner = None
-        super().__init__()
-
-    async def new_event(self):
-        """Handle scan command with task ID assignment"""
-        text = self.message.text.split()
-        
-        if len(text) < 2:
-            usage_text = (
-                "**Usage:** `/scan <channel_id> [filter]`\n\n"
-                "**Examples:**\n"
-                "`/scan @my_channel`\n"
-                "`/scan -1001234567890`\n"
-                "`/scan @movies_channel movie`\n\n"
-                "**Purpose:** Build file database for duplicate detection"
-            )
-            await send_message(self.message, usage_text)
-            return
-
-        self.channel_id = text[1]
-        self.filter_tags = text[2:] if len(text) > 2 else []
-
-        if not user:
-            await send_message(self.message, "❌ User session is required for channel scanning!")
-            return
-
-        filter_text = f" with filter: {' '.join(self.filter_tags)}" if self.filter_tags else ""
-        status_msg = await send_message(
-            self.message, 
-            f"🔍 **Starting scan** `{str(self.mid)[:12]}`\n"
-            f"📋 **Channel:** `{self.channel_id}`{filter_text}\n"
-            f"⏹️ **Cancel with:** `/cancel {str(self.mid)[:12]}`"
-        )
-
-        try:
-            self.scanner = ChannelScanner(user, self.channel_id, filter_tags=self.filter_tags)
-            self.scanner.listener = self
-            await self.scanner.scan(status_msg)
-            
-        except Exception as e:
-            LOGGER.error(f"Channel scan error: {e}")
-            await edit_message(status_msg, f"❌ Scan failed: {str(e)}")
-
-    def cancel_task(self):
-        """Cancel the scan operation"""
-        self.is_cancelled = True
-        if self.scanner:
-            self.scanner.running = False
-        LOGGER.info(f"Channel scan cancelled for {self.channel_id}")
-
-@new_task
-async def channel_scan(client, message):
-    """Handle /scan command with task ID support"""
-    await ChannelScanListener(user, message).new_event()
-
 @new_task
 async def channel_leech_cmd(client, message):
-    """Handle /cleech command - ENHANCED DEBUG VERSION with complete state isolation"""
-    await ChannelLeech(client, message).new_event()
+    """Handle /cleech command - ENHANCED DEBUG VERSION with optional DB sync disable"""
+    # Check if --test flag is in the command to disable DB sync
+    test_mode = '--test' in message.text
+    await ChannelLeech(client, message, sync_db=not test_mode).new_event()
 
 # Register handlers
-bot.add_handler(MessageHandler(
-    channel_scan,
-    filters=command("scan") & CustomFilters.authorized
-))
-
 bot.add_handler(MessageHandler(
     channel_leech_cmd, 
     filters=command("cleech") & CustomFilters.authorized
