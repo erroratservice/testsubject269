@@ -21,17 +21,46 @@ class ChannelScanner:
         self.processed = 0
         self.db_entries = 0
         self.status_message = None
-        self.batch_sleep = 5  # Sleep 2 seconds after each batch
+        self.batch_sleep = 2  # Sleep 2 seconds after each batch
         self.message_sleep = 0.1  # Small delay between messages
+        self.listener = None  # For cancellation support
 
     async def scan(self, status_msg=None):
-        """Main scanning function with proper batching"""
+        """Main scanning function with proper batching and cancellation support"""
         self.status_message = status_msg
         batch_count = 0
         
         try:
+            # Test access first
+            try:
+                chat = await self.user_client.get_chat(self.channel_id)
+                await self._update_status(f"📋 Scanning channel: **{chat.title}**")
+            except Exception as e:
+                if "PEER_ID_INVALID" in str(e):
+                    error_msg = (
+                        f"❌ **Access Denied to {self.channel_id}**\n\n"
+                        f"**Reason:** User session is not a member of this channel\n\n"
+                        f"**Solutions:**\n"
+                        f"• Join the channel with your user account\n"
+                        f"• For private channels: Get invited first\n"
+                        f"• Verify the channel ID is correct\n"
+                        f"• Wait a few minutes after joining, then retry"
+                    )
+                    await self._update_status(error_msg)
+                    return
+                else:
+                    raise e
+            
             async for message in self.user_client.get_chat_history(self.channel_id, limit=self.max_messages):
+                # Check for cancellation via listener
+                if hasattr(self, 'listener') and self.listener and self.listener.is_cancelled:
+                    await self._update_status("❌ **Scan cancelled by user**")
+                    LOGGER.info(f"Channel scan cancelled for {self.channel_id}")
+                    break
+                    
+                # Check internal running flag
                 if not self.running:
+                    await self._update_status("❌ **Scan stopped**")
                     break
                 
                 self.processed += 1
@@ -58,9 +87,11 @@ class ChannelScanner:
             if batch_count > 0:
                 await self._handle_batch_complete(batch_count)
 
-            await self._update_status(
-                f'✅ Scan complete! Processed: {self.processed} | New files: {self.db_entries}'
-            )
+            # Final status if not cancelled
+            if not (hasattr(self, 'listener') and self.listener and self.listener.is_cancelled):
+                await self._update_status(
+                    f'✅ **Scan complete!** Processed: {self.processed} | New files: {self.db_entries}'
+                )
 
         except FloodWait as e:
             LOGGER.warning(f'FloodWait encountered: waiting {e.x} seconds')
