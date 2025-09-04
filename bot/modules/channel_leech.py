@@ -46,6 +46,7 @@ def sanitize_filename(filename):
     return filename
 
 class ChannelLeech(TaskListener):
+    # Default settings are now defined here
     CONCURRENCY = 4
     TASK_START_DELAY = 2
 
@@ -62,7 +63,9 @@ class ChannelLeech(TaskListener):
         self.downloaded = 0
         self.skipped = 0
         self.errors = 0
+        
         self.is_leech = True
+        
         self.rclone_path = None
         self.gdrive_id = None
         self.drive_id = None
@@ -75,28 +78,35 @@ class ChannelLeech(TaskListener):
     def _apply_user_settings_with_fallbacks(self):
         from bot import config_dict
         user_dict = getattr(self, 'user_dict', {})
+        
         LOGGER.info("=== APPLYING USER SETTINGS WITH FALLBACKS ===")
+        
         if user_dict.get("split_size", False):
             self.split_size = user_dict["split_size"]
         else:
             self.split_size = config_dict.get("LEECH_SPLIT_SIZE", 2097152000)
-        if (user_dict.get("as_doc", False) or "as_doc" not in user_dict and config_dict.get("AS_DOCUMENT", True)):
+        
+        if (user_dict.get("as_doc", False) or 
+            "as_doc" not in user_dict and config_dict.get("AS_DOCUMENT", True)):
             self.as_doc = True
         else:
             self.as_doc = False
+        
         if user_dict.get("leech_dest", False):
             self.leech_dest = user_dict["leech_dest"]
         elif "leech_dest" not in user_dict and config_dict.get("LEECH_DUMP_CHAT"):
             self.leech_dest = config_dict["LEECH_DUMP_CHAT"]
         else:
             self.leech_dest = None
+        
         self.is_leech = True
         self.up_dest = self.leech_dest
+        
         LOGGER.info("=== USER SETTINGS APPLIED WITH FALLBACKS ===")
 
     async def onUploadComplete(self, link, size, files, folders, mime_type, name, rclone_path=None):
         LOGGER.info(f"Channel Leech: Finished uploading {name}. Cleaning up individual file.")
-        file_path = os.path.join(self.dir, name)
+        file_path = f"{self.dir}/{name}"
         if await aiopath.exists(file_path):
             try:
                 await remove(file_path)
@@ -106,17 +116,28 @@ class ChannelLeech(TaskListener):
     async def new_event(self):
         text = self.message.text.split()
         args = self._parse_arguments(text[1:])
+
         if 'channel' not in args:
             await send_message(self.message, "Usage: /cleech -ch <channel_id> ...")
             return
+
         self.channel_id = args['channel']
         self.filter_tags = args.get('filter', [])
         self.use_caption_as_filename = not args.get('no_caption', False)
+
         if not user:
             await send_message(self.message, "User session is required!")
             return
-        self.operation_key = await channel_status.start_operation(self.message.from_user.id, self.channel_id, "channel_leech")
-        self.status_message = await send_message(self.message, f"Starting channel leech `{str(self.mid)[:12]}`...")
+
+        self.operation_key = await channel_status.start_operation(
+            self.message.from_user.id, self.channel_id, "channel_leech"
+        )
+        
+        self.status_message = await send_message(
+            self.message, 
+            f"Starting channel leech `{str(self.mid)[:12]}`..."
+        )
+
         try:
             await self._process_channel()
         except Exception as e:
@@ -129,6 +150,7 @@ class ChannelLeech(TaskListener):
     def _generate_file_details(self, message, file_info):
         final_filename = file_info['file_name']
         new_caption = None
+        
         if self.use_caption_as_filename and hasattr(message, 'caption') and message.caption:
             first_line = message.caption.split('\n')[0].strip()
             if first_line:
@@ -153,15 +175,19 @@ class ChannelLeech(TaskListener):
             try:
                 final_filename, new_caption = self._generate_file_details(message, file_info)
                 
-                # Create a fresh helper instance for each task to ensure state isolation
+                # Channel leeches must run with the user session
+                session = 'user'
+
+                # Use a fresh helper instance for each task to ensure state isolation
                 telegram_helper = TelegramDownloadHelper(self)
                 
                 # Pass name and caption directly to avoid race conditions
-                await telegram_helper.add_download(message, self.dir, self.user_id, name=final_filename, caption=new_caption)
+                await telegram_helper.add_download(message, self.dir, session, name=final_filename, caption=new_caption)
                 
                 async with self.counters_lock:
                     self.downloaded += 1
                 await channel_status.update_operation(self.operation_key, downloaded=self.downloaded)
+                
                 await database.add_file_entry(self.channel_id, message.id, file_info)
 
             except Exception as e:
@@ -173,32 +199,48 @@ class ChannelLeech(TaskListener):
     async def _process_channel(self):
         tasks = []
         semaphore = asyncio.Semaphore(self.CONCURRENCY)
-        self.dir = f"{DOWNLOAD_DIR}{self.mid}"
+        self.dir = f"{DOWNLOAD_DIR}{self.mid}/"
         await makedirs(self.dir, exist_ok=True)
 
         try:
             chat = await user.get_chat(self.channel_id)
-            await edit_message(self.status_message, f"Processing channel: **{chat.title}** with **{self.CONCURRENCY}** concurrent downloads...")
+            await edit_message(
+                self.status_message, 
+                f"Processing channel: **{chat.title}** with **{self.CONCURRENCY}** concurrent downloads..."
+            )
+
             scanner = ChannelScanner(user, self.channel_id, filter_tags=self.filter_tags)
 
             async for message in user.get_chat_history(self.channel_id):
-                if self.is_cancelled: break
+                if self.is_cancelled:
+                    break
+
                 self.processed += 1
                 await channel_status.update_operation(self.operation_key, processed=self.processed)
+
                 file_info = await scanner._extract_file_info(message)
-                if not file_info: continue
-                if self.filter_tags and not all(tag.lower() in file_info['search_text'].lower() for tag in self.filter_tags): continue
+                if not file_info:
+                    continue
+
+                if self.filter_tags and not all(tag.lower() in file_info['search_text'].lower() for tag in self.filter_tags):
+                    continue
+
                 if await database.check_file_exists(file_info.get('file_unique_id')):
                     self.skipped += 1
                     await channel_status.update_operation(self.operation_key, skipped=self.skipped)
                     continue
+
                 task = asyncio.create_task(self._worker(message, file_info, semaphore))
                 tasks.append(task)
-            
-            if tasks: await asyncio.gather(*tasks)
-            final_text = (f"**Channel leech completed!**\n\n"
-                          f"**Processed:** {self.processed}, **Downloaded:** {self.downloaded}, "
-                          f"**Skipped:** {self.skipped}, **Errors:** {self.errors}")
+
+            if tasks:
+                await asyncio.gather(*tasks)
+
+            final_text = (
+                f"**Channel leech completed!**\n\n"
+                f"**Processed:** {self.processed}, **Downloaded:** {self.downloaded}, "
+                f"**Skipped:** {self.skipped}, **Errors:** {self.errors}"
+            )
             await edit_message(self.status_message, final_text)
 
         except Exception as e:
@@ -211,12 +253,16 @@ class ChannelLeech(TaskListener):
         i = 0
         while i < len(args):
             if args[i] == '-ch' and i + 1 < len(args):
-                parsed['channel'] = args[i + 1]; i += 2
+                parsed['channel'] = args[i + 1]
+                i += 2
             elif args[i] == '-f' and i + 1 < len(args):
-                parsed['filter'] = args[i + 1].split(); i += 2
+                parsed['filter'] = args[i + 1].split()
+                i += 2
             elif args[i] == '--no-caption':
-                parsed['no_caption'] = True; i += 1
-            else: i += 1
+                parsed['no_caption'] = True
+                i += 1
+            else:
+                i += 1
         return parsed
 
     def cancel_task(self):
@@ -224,6 +270,7 @@ class ChannelLeech(TaskListener):
         LOGGER.info(f"Channel leech task cancelled for {self.channel_id}")
 
 # --- Channel Scanning System (Unchanged) ---
+
 class ChannelScanListener(TaskListener):
     def __init__(self, client, message):
         self.client = client
@@ -253,7 +300,8 @@ class ChannelScanListener(TaskListener):
 
     def cancel_task(self):
         self.is_cancelled = True
-        if self.scanner: self.scanner.running = False
+        if self.scanner:
+            self.scanner.running = False
         LOGGER.info(f"Channel scan cancelled for {self.channel_id}")
 
 @new_task
@@ -264,5 +312,13 @@ async def channel_scan(client, message):
 async def channel_leech_cmd(client, message):
     await ChannelLeech(client, message).new_event()
 
-bot.add_handler(MessageHandler(channel_scan, filters=command("scan") & CustomFilters.authorized))
-bot.add_handler(MessageHandler(channel_leech_cmd, filters=command("cleech") & CustomFilters.authorized))
+# Register handlers
+bot.add_handler(MessageHandler(
+    channel_scan,
+    filters=command("scan") & CustomFilters.authorized
+))
+
+bot.add_handler(MessageHandler(
+    channel_leech_cmd, 
+    filters=command("cleech") & CustomFilters.authorized
+))
