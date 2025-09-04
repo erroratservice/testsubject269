@@ -179,7 +179,7 @@ class ChannelLeech(TaskListener):
             self.message, 
             f"🔄 **Starting channel leech** `{str(self.mid)[:12]}`\n"
             f"📋 **Channel:** `{self.channel_id}`{filter_text}\n"
-            f"📤 **Upload:** TaskListener Pipeline (Fallback System)\n"
+            f"📤 **Upload:** TaskListener Pipeline (Unique Filenames)\n"
             f"📝 **Filename mode:** {caption_mode}\n"
             f"⚙️ **Split size:** {self.split_size} bytes\n"
             f"📄 **As document:** {self.as_doc}\n"
@@ -207,13 +207,13 @@ class ChannelLeech(TaskListener):
 
         try:
             chat = await user.get_chat(self.channel_id)
-            caption_info = "with caption filenames" if self.use_caption_as_filename else "with original filenames"
+            caption_info = "with unique caption filenames" if self.use_caption_as_filename else "with original filenames"
             
             await edit_message(
                 self.status_message, 
                 f"📋 Processing channel: **{chat.title}**\n"
                 f"🔍 Scanning messages...\n"
-                f"📤 Upload: **Fallback System Active** {caption_info}"
+                f"📤 Upload: **Unique Filename System** {caption_info}"
             )
 
             scanner = ChannelScanner(user, self.channel_id, filter_tags=self.filter_tags)
@@ -280,7 +280,7 @@ class ChannelLeech(TaskListener):
                         f"⬇️ Downloaded: {downloaded}\n"
                         f"⏭️ Skipped: {skipped}\n"
                         f"❌ Errors: {errors}\n"
-                        f"📤 Using: Fallback System"
+                        f"📤 Using: Unique Filename System"
                     )
                     await edit_message(self.status_message, status_text)
                     
@@ -295,7 +295,7 @@ class ChannelLeech(TaskListener):
                 f"⏭️ **Skipped (duplicates):** {skipped}\n"
                 f"❌ **Errors:** {errors}\n\n"
                 f"🎯 **Channel:** `{self.channel_id}`\n"
-                f"📤 **System:** Three-Tier Fallback Applied"
+                f"📤 **System:** Unique Filenames Applied"
             )
             await edit_message(self.status_message, final_text)
 
@@ -309,40 +309,74 @@ class ChannelLeech(TaskListener):
             await self.on_download_error(f"Channel processing error: {str(e)}")
 
     async def _download_file_tasklistener_pipeline(self, message, file_info):
-        """Download file with proper TaskListener pipeline integration"""
+        """Download file with proper unique filename generation per file"""
         download_path = f"{DOWNLOAD_DIR}{self.mid}/"
         
-        # ✅ Process caption-based filename BEFORE download
+        # ✅ Generate completely fresh filename for EACH file
         if self.use_caption_as_filename and hasattr(message, 'caption') and message.caption:
             first_line = message.caption.split('\n')[0].strip()
             if first_line:
+                # Start fresh - don't modify file_info directly
                 clean_name = sanitize_filename(first_line)
                 if clean_name and len(clean_name) >= 3:
-                    original_name = file_info['file_name']
-                    if '.' in original_name:
-                        extension = '.' + original_name.split('.')[-1]
-                    else:
-                        extension = ''
+                    # Get original extension
+                    original_extension = os.path.splitext(file_info['file_name'])[1]
                     
-                    new_filename = clean_name + extension
-                    LOGGER.info(f"Caption filename: '{original_name}' → '{new_filename}'")
-                    file_info['file_name'] = new_filename
+                    # ✅ CRITICAL: Only add extension if not already present
+                    if not clean_name.lower().endswith(original_extension.lower()):
+                        clean_name = clean_name + original_extension
+                    
+                    # ✅ Add unique identifier to prevent collisions
+                    unique_id = message.id
+                    final_filename = f"{clean_name[:-len(original_extension)]}_{unique_id}{original_extension}"
+                    
+                    LOGGER.info(f"Fresh filename: '{file_info['file_name']}' → '{final_filename}'")
+                    
+                    # Create a NEW file_info dict for this specific file
+                    updated_file_info = file_info.copy()
+                    updated_file_info['file_name'] = final_filename
+                else:
+                    # Use original name with unique ID
+                    base_name = os.path.splitext(file_info['file_name'])[0]
+                    extension = os.path.splitext(file_info['file_name'])[1]
+                    updated_file_info = file_info.copy()
+                    updated_file_info['file_name'] = f"{base_name}_{message.id}{extension}"
+            else:
+                # Caption exists but first line is empty
+                base_name = os.path.splitext(file_info['file_name'])[0]
+                extension = os.path.splitext(file_info['file_name'])[1]
+                updated_file_info = file_info.copy()
+                updated_file_info['file_name'] = f"{base_name}_{message.id}{extension}"
+        else:
+            # Use original filename with unique ID
+            base_name = os.path.splitext(file_info['file_name'])[0]
+            extension = os.path.splitext(file_info['file_name'])[1]
+            updated_file_info = file_info.copy()
+            updated_file_info['file_name'] = f"{base_name}_{message.id}{extension}"
         
         # ✅ Create download directory
         os.makedirs(download_path, exist_ok=True)
         
         # ✅ Verify settings are still applied
-        LOGGER.info(f"Pipeline settings check:")
+        LOGGER.info(f"Pipeline settings check for {updated_file_info['file_name']}:")
         LOGGER.info(f"  is_leech: {self.is_leech}")
         LOGGER.info(f"  split_size: {self.split_size}")
         LOGGER.info(f"  as_doc: {getattr(self, 'as_doc', 'NOT_SET')}")
         LOGGER.info(f"  leech_dest: {getattr(self, 'leech_dest', 'NOT_SET')}")
         
-        # ✅ Use TelegramDownloadHelper - integrates with TaskListener pipeline
-        # When download completes, TaskListener will automatically call:
-        # on_download_complete() → TelegramUploader(self, up_dir) → applies user_dict + fallbacks
+        # ✅ Use TelegramDownloadHelper with updated file_info containing unique filename
+        # This ensures each file gets its own unique name in the TaskListener pipeline
         telegram_helper = TelegramDownloadHelper(self)
-        await telegram_helper.add_download(message, download_path, "user")
+        
+        # Temporarily update the file info in the message for unique filename processing
+        original_file_name = file_info['file_name']
+        file_info['file_name'] = updated_file_info['file_name']
+        
+        try:
+            await telegram_helper.add_download(message, download_path, "user")
+        finally:
+            # Restore original filename to avoid affecting other operations
+            file_info['file_name'] = original_file_name
 
     def _parse_arguments(self, args):
         """Parse command arguments including new --no-caption flag"""
@@ -435,7 +469,7 @@ async def channel_scan(client, message):
 
 @new_task
 async def channel_leech_cmd(client, message):
-    """Handle /cleech command - uses three-tier fallback system"""
+    """Handle /cleech command - uses three-tier fallback system with unique filenames"""
     await ChannelLeech(client, message).new_event()
 
 # Register handlers
