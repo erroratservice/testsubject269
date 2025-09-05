@@ -44,28 +44,19 @@ def sanitize_filename(filename):
 class ConcurrentChannelLeech(TaskListener):
     """A dedicated, isolated TaskListener for a single concurrent download."""
     def __init__(self, main_listener, message_to_leech, file_info):
-        # Inherit necessary properties from the main listener
-        self.message = main_listener.message # The original command message
+        self.message = main_listener.message
         self.client = main_listener.client
         self.user_dict = main_listener.user_dict
         self.use_caption_as_filename = main_listener.use_caption_as_filename
-        
-        # Store the specific message we need to leech
         self.message_to_leech = message_to_leech
         self.file_info = file_info
-
-        # Set leech mode and clear cloud paths
         self.is_leech = True
         self.rclone_path = None
         self.gdrive_id = None
         self.drive_id = None
         self.folder_id = None
         self.up_dest = None
-
-        # Call parent constructor to get a NEW, UNIQUE mid/gid for this specific file
         super().__init__()
-        
-        # Apply the same user settings
         self._apply_concurrent_user_settings()
 
     def _apply_concurrent_user_settings(self):
@@ -81,10 +72,9 @@ class ConcurrentChannelLeech(TaskListener):
 
     async def run(self):
         """Executes the download and upload for a single file."""
-        download_path = f"{DOWNLOAD_DIR}{self.mid}/" # Each task gets its own unique directory
+        download_path = f"{DOWNLOAD_DIR}{self.mid}/"
         os.makedirs(download_path, exist_ok=True)
         
-        # Generate unique filename for this specific file
         final_filename, new_caption = self._generate_file_details(self.message_to_leech, self.file_info)
 
         self.name = final_filename
@@ -92,7 +82,7 @@ class ConcurrentChannelLeech(TaskListener):
 
         telegram_helper = TelegramDownloadHelper(self)
         await telegram_helper.add_download(self.message_to_leech, download_path, 'user', name=self.name, caption=self.caption)
-        return True # Return success
+        return True
 
     def _generate_file_details(self, message, file_info):
         final_filename = file_info['file_name']
@@ -111,6 +101,7 @@ class ConcurrentChannelLeech(TaskListener):
 
 class ChannelLeech(TaskListener):
     CONCURRENCY = 4
+    TASK_START_DELAY = 2  # Delay in seconds between starting each concurrent task
 
     def __init__(self, client, message):
         self.client = client
@@ -212,6 +203,7 @@ class ChannelLeech(TaskListener):
                 for res in results:
                     if isinstance(res, Exception):
                         errors += 1
+                        LOGGER.error(f"A concurrent task failed: {res}")
                     else:
                         downloaded += 1
 
@@ -227,6 +219,11 @@ class ChannelLeech(TaskListener):
         async with semaphore:
             if self.is_cancelled:
                 return
+            
+            # Stagger the start of each task to avoid overwhelming the system
+            if self.TASK_START_DELAY > 0:
+                await asyncio.sleep(self.TASK_START_DELAY)
+
             await listener.run()
 
     def _parse_arguments(self, args):
