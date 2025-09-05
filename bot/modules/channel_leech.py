@@ -4,7 +4,6 @@ from pyrogram.errors import FloodWait
 from bot import bot, user, DOWNLOAD_DIR, LOGGER, user_data, config_dict
 from ..helper.ext_utils.bot_utils import new_task
 from ..helper.ext_utils.db_handler import database
-from ..helper.ext_utils.files_utils import clean_download
 from ..helper.telegram_helper.message_utils import send_message, edit_message
 from ..helper.telegram_helper.filters import CustomFilters
 from ..helper.mirror_leech_utils.channel_scanner import ChannelScanner
@@ -46,7 +45,7 @@ class ConcurrentChannelLeech(TaskListener):
     """A dedicated, isolated TaskListener for a single concurrent download."""
     def __init__(self, main_listener, message_to_leech, file_info):
         # Inherit necessary properties from the main listener
-        self.message = main_listener.message # The command message
+        self.message = main_listener.message # The original command message
         self.client = main_listener.client
         self.user_dict = main_listener.user_dict
         self.use_caption_as_filename = main_listener.use_caption_as_filename
@@ -63,7 +62,7 @@ class ConcurrentChannelLeech(TaskListener):
         self.folder_id = None
         self.up_dest = None
 
-        # Call parent constructor to get a NEW, UNIQUE mid/gid
+        # Call parent constructor to get a NEW, UNIQUE mid/gid for this specific file
         super().__init__()
         
         # Apply the same user settings
@@ -93,6 +92,7 @@ class ConcurrentChannelLeech(TaskListener):
 
         telegram_helper = TelegramDownloadHelper(self)
         await telegram_helper.add_download(self.message_to_leech, download_path, 'user', name=self.name, caption=self.caption)
+        return True # Return success
 
     def _generate_file_details(self, message, file_info):
         final_filename = file_info['file_name']
@@ -198,7 +198,6 @@ class ChannelLeech(TaskListener):
                     await channel_status.update_operation(self.operation_key, skipped=skipped)
                     continue
 
-                # Create an isolated listener for this one file
                 concurrent_listener = ConcurrentChannelLeech(self, message, file_info)
                 
                 if self.concurrent_enabled:
@@ -206,7 +205,7 @@ class ChannelLeech(TaskListener):
                     tasks.append(task)
                 else: # Sequential mode
                     await self._concurrent_worker(concurrent_listener, semaphore)
-                    downloaded += 1 # In sequential mode we can assume success if no exception
+                    downloaded += 1
             
             if self.concurrent_enabled and tasks:
                 results = await asyncio.gather(*tasks, return_exceptions=True)
