@@ -101,7 +101,7 @@ class ConcurrentChannelLeech(TaskListener):
 
 class ChannelLeech(TaskListener):
     CONCURRENCY = 4
-    TASK_START_DELAY = 2  # Delay in seconds between starting each concurrent task
+    TASK_START_DELAY = 2
 
     def __init__(self, client, message):
         self.client = client
@@ -195,15 +195,18 @@ class ChannelLeech(TaskListener):
                     task = asyncio.create_task(self._concurrent_worker(concurrent_listener, semaphore))
                     tasks.append(task)
                 else: # Sequential mode
-                    await self._concurrent_worker(concurrent_listener, semaphore)
-                    downloaded += 1
+                    try:
+                        await self._concurrent_worker(concurrent_listener, semaphore)
+                        downloaded += 1
+                    except Exception as e:
+                        errors += 1
+                        LOGGER.error(f"Sequential task for message {message.id} failed: {e}")
             
             if self.concurrent_enabled and tasks:
                 results = await asyncio.gather(*tasks, return_exceptions=True)
                 for res in results:
                     if isinstance(res, Exception):
                         errors += 1
-                        LOGGER.error(f"A concurrent task failed: {res}")
                     else:
                         downloaded += 1
 
@@ -220,11 +223,20 @@ class ChannelLeech(TaskListener):
             if self.is_cancelled:
                 return
             
-            # Stagger the start of each task to avoid overwhelming the system
             if self.TASK_START_DELAY > 0:
                 await asyncio.sleep(self.TASK_START_DELAY)
-
+            
+            # The listener.run() method will raise an exception on failure
             await listener.run()
+            
+            # This part will only be reached if the download AND upload were successful
+            await database.add_file_entry(
+                self.channel_id,
+                listener.message_to_leech.id,
+                listener.file_info
+            )
+            await channel_status.update_operation(self.operation_key, downloaded=self.downloaded + 1)
+
 
     def _parse_arguments(self, args):
         parsed = {}
