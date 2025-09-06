@@ -33,7 +33,7 @@ def remove_emoji(text):
 def sanitize_filename(filename):
     """Sanitize filename for safe file system use"""
     filename = remove_emoji(filename)
-    filename = re.sub(r'[<>:"/\\|?*]', '', filename)
+    filename = re.sub(r'[<>:"/\|?*]', '', filename)
     filename = re.sub(r'[^\w\s.-]', '', filename)
     filename = re.sub(r'\s+', ' ', filename)
     filename = filename.strip()
@@ -44,21 +44,27 @@ def sanitize_filename(filename):
 class ConcurrentChannelLeech(TaskListener):
     """A dedicated, isolated TaskListener for a single concurrent download."""
     def __init__(self, main_listener, message_to_leech, file_info):
+        # CRITICAL FIX: Set leech mode BEFORE calling super().__init__()
+        self.is_leech = True
+        
+        # Keep original attribute assignments
         self.message = main_listener.message
         self.client = main_listener.client
         self.user_dict = main_listener.user_dict
         self.use_caption_as_filename = main_listener.use_caption_as_filename
         self.message_to_leech = message_to_leech
         self.file_info = file_info
-        self.is_leech = True
+        
+        # Clear cloud upload paths to ensure leech mode
         self.rclone_path = None
         self.gdrive_id = None
         self.drive_id = None
         self.folder_id = None
         self.up_dest = None
+        
         super().__init__()
         self._apply_concurrent_user_settings()
-
+    
     def _apply_concurrent_user_settings(self):
         """Applies user settings to this isolated instance."""
         if self.user_dict.get("split_size", False):
@@ -68,22 +74,23 @@ class ConcurrentChannelLeech(TaskListener):
         
         self.as_doc = self.user_dict.get("as_doc", True)
         self.leech_dest = self.user_dict.get("leech_dest") or config_dict.get("LEECH_DUMP_CHAT")
+        
+        # CRITICAL FIX: Ensure leech mode is maintained after user settings
+        self.is_leech = True
         self.up_dest = self.leech_dest
-
+    
     async def run(self):
         """Executes the download and upload for a single file."""
         download_path = f"{DOWNLOAD_DIR}{self.mid}/"
         os.makedirs(download_path, exist_ok=True)
         
         final_filename, new_caption = self._generate_file_details(self.message_to_leech, self.file_info)
-
         self.name = final_filename
         self.caption = new_caption
-
         telegram_helper = TelegramDownloadHelper(self)
         await telegram_helper.add_download(self.message_to_leech, download_path, 'user', name=self.name, caption=self.caption)
         return True
-
+    
     def _generate_file_details(self, message, file_info):
         final_filename = file_info['file_name']
         new_caption = None
@@ -102,8 +109,12 @@ class ConcurrentChannelLeech(TaskListener):
 class ChannelLeech(TaskListener):
     CONCURRENCY = 4
     TASK_START_DELAY = 2
-
+    
     def __init__(self, client, message):
+        # CRITICAL FIX: Set leech mode BEFORE calling super().__init__()
+        self.is_leech = True
+        
+        # Keep original attribute assignments
         self.client = client
         self.message = message
         self.channel_id = None
@@ -112,15 +123,17 @@ class ChannelLeech(TaskListener):
         self.operation_key = None
         self.use_caption_as_filename = True
         self.concurrent_enabled = True
-        self.is_leech = True
+        
+        # Clear cloud upload paths to ensure leech mode
         self.rclone_path = None
         self.gdrive_id = None
         self.drive_id = None
         self.folder_id = None
         self.up_dest = None
+        
         super().__init__()
         self._apply_user_settings_with_fallbacks()
-
+    
     def _apply_user_settings_with_fallbacks(self):
         self.user_dict = user_data.get(self.message.from_user.id, {})
         LOGGER.info("=== APPLYING USER SETTINGS WITH FALLBACKS ===")
@@ -138,10 +151,12 @@ class ChannelLeech(TaskListener):
             self.leech_dest = config_dict["LEECH_DUMP_CHAT"]
         else:
             self.leech_dest = None
+        
+        # CRITICAL FIX: Ensure leech mode is maintained after user settings
         self.is_leech = True
         self.up_dest = self.leech_dest
         LOGGER.info("=== USER SETTINGS APPLIED WITH FALLBACKS ===")
-
+    
     async def new_event(self):
         text = self.message.text.split()
         args = self._parse_arguments(text[1:])
@@ -166,17 +181,15 @@ class ChannelLeech(TaskListener):
         finally:
             if self.operation_key:
                 await channel_status.stop_operation(self.operation_key)
-
+    
     async def _process_channel(self):
         tasks = []
         semaphore = asyncio.Semaphore(self.CONCURRENCY)
         processed, downloaded, skipped, errors = 0, 0, 0, 0
-
         try:
             chat = await user.get_chat(self.channel_id)
             await edit_message(self.status_message, f"Processing channel: **{chat.title}**...")
             scanner = ChannelScanner(user, self.channel_id, filter_tags=self.filter_tags)
-
             async for message in user.get_chat_history(self.channel_id):
                 if self.is_cancelled: break
                 processed += 1
@@ -188,7 +201,6 @@ class ChannelLeech(TaskListener):
                     skipped += 1
                     await channel_status.update_operation(self.operation_key, skipped=skipped)
                     continue
-
                 concurrent_listener = ConcurrentChannelLeech(self, message, file_info)
                 
                 if self.concurrent_enabled:
@@ -209,15 +221,13 @@ class ChannelLeech(TaskListener):
                         errors += 1
                     else:
                         downloaded += 1
-
             final_text = (f"**Channel leech completed!**\n\n"
                           f"**Processed:** {processed}, **Downloaded:** {downloaded}, "
                           f"**Skipped:** {skipped}, **Errors:** {errors}")
             await edit_message(self.status_message, final_text)
-
         except Exception as e:
             await self.on_download_error(f"Channel processing error: {str(e)}")
-
+    
     async def _concurrent_worker(self, listener, semaphore):
         async with semaphore:
             if self.is_cancelled:
@@ -236,8 +246,7 @@ class ChannelLeech(TaskListener):
                 listener.file_info
             )
             await channel_status.update_operation(self.operation_key, downloaded=self.downloaded + 1)
-
-
+    
     def _parse_arguments(self, args):
         parsed = {}
         i = 0
@@ -252,7 +261,7 @@ class ChannelLeech(TaskListener):
                 parsed['sequential'] = True; i += 1
             else: i += 1
         return parsed
-
+    
     def cancel_task(self):
         self.is_cancelled = True
         LOGGER.info(f"Channel leech task cancelled for {self.channel_id}")
@@ -265,7 +274,7 @@ class ChannelScanListener(TaskListener):
         self.filter_tags = []
         self.scanner = None
         super().__init__()
-
+    
     async def new_event(self):
         text = self.message.text.split()
         if len(text) < 2:
@@ -283,7 +292,7 @@ class ChannelScanListener(TaskListener):
             await self.scanner.scan(status_msg)
         except Exception as e:
             await edit_message(status_msg, f"Scan failed: {str(e)}")
-
+    
     def cancel_task(self):
         self.is_cancelled = True
         if self.scanner: self.scanner.running = False
