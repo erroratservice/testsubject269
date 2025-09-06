@@ -13,7 +13,6 @@ from ..helper.listeners.task_listener import TaskListener
 import asyncio
 import os
 import re
-import traceback
 
 def remove_emoji(text):
     """Remove emojis and special characters from text"""
@@ -66,8 +65,8 @@ class ConcurrentChannelLeech(TaskListener):
             self.split_size = self.user_dict["split_size"]
         else:
             self.split_size = config_dict.get("LEECH_SPLIT_SIZE", 2097152000)
-
-        self.as_doc = self.user_dict.get("as_doc", False)
+        
+        self.as_doc = self.user_dict.get("as_doc", True)
         self.leech_dest = self.user_dict.get("leech_dest") or config_dict.get("LEECH_DUMP_CHAT")
         self.up_dest = self.leech_dest
 
@@ -75,26 +74,15 @@ class ConcurrentChannelLeech(TaskListener):
         """Executes the download and upload for a single file."""
         download_path = f"{DOWNLOAD_DIR}{self.mid}/"
         os.makedirs(download_path, exist_ok=True)
-
+        
         final_filename, new_caption = self._generate_file_details(self.message_to_leech, self.file_info)
 
         self.name = final_filename
         self.caption = new_caption
 
-        LOGGER.info(f"Starting download for: {self.name} (Message ID: {self.message_to_leech.id})")
         telegram_helper = TelegramDownloadHelper(self)
-        try:
-            success = await telegram_helper.add_download(self.message_to_leech, download_path, 'user', name=self.name, caption=self.caption)
-            if success:
-                LOGGER.info(f"Successfully processed: {self.name}")
-                return True
-            else:
-                LOGGER.error(f"Download failed for: {self.name}")
-                return False
-        except Exception as e:
-            LOGGER.error(f"An exception occurred during processing of {self.name}: {e}\n{traceback.format_exc()}")
-            return False
-
+        await telegram_helper.add_download(self.message_to_leech, download_path, 'user', name=self.name, caption=self.caption)
+        return True
 
     def _generate_file_details(self, message, file_info):
         final_filename = file_info['file_name']
@@ -130,24 +118,27 @@ class ChannelLeech(TaskListener):
         self.drive_id = None
         self.folder_id = None
         self.up_dest = None
-        # Counters
-        self.processed = 0
-        self.downloaded = 0
-        self.skipped = 0
-        self.errors = 0
         super().__init__()
         self._apply_user_settings_with_fallbacks()
 
     def _apply_user_settings_with_fallbacks(self):
         self.user_dict = user_data.get(self.message.from_user.id, {})
         LOGGER.info("=== APPLYING USER SETTINGS WITH FALLBACKS ===")
-        LOGGER.info(f"Raw user_dict: {self.user_dict}")
-        self.split_size = self.user_dict.get("split_size") or config_dict.get("LEECH_SPLIT_SIZE", 2097152000)
-        LOGGER.info(f"Split size: {self.split_size}")
-        self.as_doc = self.user_dict.get("as_doc", config_dict.get("AS_DOCUMENT", True))
-        LOGGER.info(f"Upload as document: {self.as_doc}")
-        self.leech_dest = self.user_dict.get("leech_dest") or config_dict.get("LEECH_DUMP_CHAT")
-        LOGGER.info(f"Leech destination: {self.leech_dest}")
+        if self.user_dict.get("split_size", False):
+            self.split_size = self.user_dict["split_size"]
+        else:
+            self.split_size = config_dict.get("LEECH_SPLIT_SIZE", 2097152000)
+        if (self.user_dict.get("as_doc", False) or "as_doc" not in self.user_dict and config_dict.get("AS_DOCUMENT", True)):
+            self.as_doc = True
+        else:
+            self.as_doc = False
+        if self.user_dict.get("leech_dest", False):
+            self.leech_dest = self.user_dict["leech_dest"]
+        elif "leech_dest" not in self.user_dict and config_dict.get("LEECH_DUMP_CHAT"):
+            self.leech_dest = config_dict["LEECH_DUMP_CHAT"]
+        else:
+            self.leech_dest = None
+        self.is_leech = True
         self.up_dest = self.leech_dest
         LOGGER.info("=== USER SETTINGS APPLIED WITH FALLBACKS ===")
 
@@ -170,87 +161,81 @@ class ChannelLeech(TaskListener):
         try:
             await self._process_channel()
         except Exception as e:
-            LOGGER.error(f"Channel leech error: {e}\n{traceback.format_exc()}")
-            await edit_message(self.status_message, f"An unexpected error occurred: {str(e)}")
+            LOGGER.error(f"Channel leech error: {e}")
+            await edit_message(self.status_message, f"Error: {str(e)}")
         finally:
             if self.operation_key:
                 await channel_status.stop_operation(self.operation_key)
-            LOGGER.info("Channel leech operation finished.")
 
     async def _process_channel(self):
         tasks = []
         semaphore = asyncio.Semaphore(self.CONCURRENCY)
+        processed, downloaded, skipped, errors = 0, 0, 0, 0
 
         try:
             chat = await user.get_chat(self.channel_id)
             await edit_message(self.status_message, f"Processing channel: **{chat.title}**...")
             scanner = ChannelScanner(user, self.channel_id, filter_tags=self.filter_tags)
-            LOGGER.info(f"Starting to iterate messages in channel {self.channel_id}")
 
             async for message in user.get_chat_history(self.channel_id):
-                if self.is_cancelled:
-                    LOGGER.info("Operation cancelled by user.")
-                    break
-                self.processed += 1
-                await channel_status.update_operation(self.operation_key, processed=self.processed)
+                if self.is_cancelled: break
+                processed += 1
+                await channel_status.update_operation(self.operation_key, processed=processed)
                 file_info = await scanner._extract_file_info(message)
-                if not file_info:
-                    continue
-                if self.filter_tags and not all(tag.lower() in file_info['search_text'].lower() for tag in self.filter_tags):
-                    continue
+                if not file_info: continue
+                if self.filter_tags and not all(tag.lower() in file_info['search_text'].lower() for tag in self.filter_tags): continue
                 if await database.check_file_exists(file_info.get('file_unique_id')):
-                    self.skipped += 1
-                    await channel_status.update_operation(self.operation_key, skipped=self.skipped)
-                    LOGGER.info(f"Skipping already downloaded file: {file_info.get('file_name')}")
+                    skipped += 1
+                    await channel_status.update_operation(self.operation_key, skipped=skipped)
                     continue
 
                 concurrent_listener = ConcurrentChannelLeech(self, message, file_info)
-                task = asyncio.create_task(self._concurrent_worker(concurrent_listener, semaphore))
-                tasks.append(task)
-
-            if tasks:
-                LOGGER.info(f"Awaiting completion of {len(tasks)} tasks.")
-                await asyncio.gather(*tasks)
+                
+                if self.concurrent_enabled:
+                    task = asyncio.create_task(self._concurrent_worker(concurrent_listener, semaphore))
+                    tasks.append(task)
+                else: # Sequential mode
+                    try:
+                        await self._concurrent_worker(concurrent_listener, semaphore)
+                        downloaded += 1
+                    except Exception as e:
+                        errors += 1
+                        LOGGER.error(f"Sequential task for message {message.id} failed: {e}")
+            
+            if self.concurrent_enabled and tasks:
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for res in results:
+                    if isinstance(res, Exception):
+                        errors += 1
+                    else:
+                        downloaded += 1
 
             final_text = (f"**Channel leech completed!**\n\n"
-                          f"**Processed:** {self.processed}, **Downloaded:** {self.downloaded}, "
-                          f"**Skipped:** {self.skipped}, **Errors:** {self.errors}")
+                          f"**Processed:** {processed}, **Downloaded:** {downloaded}, "
+                          f"**Skipped:** {skipped}, **Errors:** {errors}")
             await edit_message(self.status_message, final_text)
-            LOGGER.info(f"Final stats: Processed={self.processed}, Downloaded={self.downloaded}, Skipped={self.skipped}, Errors={self.errors}")
 
         except Exception as e:
-            LOGGER.error(f"Error while processing channel: {e}\n{traceback.format_exc()}")
             await self.on_download_error(f"Channel processing error: {str(e)}")
 
     async def _concurrent_worker(self, listener, semaphore):
         async with semaphore:
             if self.is_cancelled:
                 return
-
-            LOGGER.info(f"Starting worker for message: {listener.message_to_leech.id}")
-            try:
-                if self.TASK_START_DELAY > 0:
-                    await asyncio.sleep(self.TASK_START_DELAY)
-
-                success = await listener.run()
-                if success:
-                    LOGGER.info(f"Worker for message {listener.message_to_leech.id} completed successfully. Adding to DB.")
-                    await database.add_file_entry(
-                        self.channel_id,
-                        listener.message_to_leech.id,
-                        listener.file_info
-                    )
-                    self.downloaded += 1
-                    await channel_status.update_operation(self.operation_key, downloaded=self.downloaded)
-                else:
-                    LOGGER.warning(f"Worker for message {listener.message_to_leech.id} failed.")
-                    self.errors += 1
-                    await channel_status.update_operation(self.operation_key, errors=self.errors)
-
-            except Exception as e:
-                self.errors += 1
-                await channel_status.update_operation(self.operation_key, errors=self.errors)
-                LOGGER.error(f"Worker for message {listener.message_to_leech.id} threw an exception: {e}\n{traceback.format_exc()}")
+            
+            if self.TASK_START_DELAY > 0:
+                await asyncio.sleep(self.TASK_START_DELAY)
+            
+            # The listener.run() method will raise an exception on failure
+            await listener.run()
+            
+            # This part will only be reached if the download AND upload were successful
+            await database.add_file_entry(
+                self.channel_id,
+                listener.message_to_leech.id,
+                listener.file_info
+            )
+            await channel_status.update_operation(self.operation_key, downloaded=self.downloaded + 1)
 
 
     def _parse_arguments(self, args):
