@@ -1,6 +1,7 @@
 from asyncio import Lock, sleep
 from time import time
-from pyrogram.errors import FloodWait
+from pyrogram.errors import FloodWait, RPCError
+import traceback
 
 from bot import (
     LOGGER,
@@ -25,6 +26,7 @@ class TelegramDownloadHelper:
         self._listener = listener
         self._id = ""
         self.session = ""
+        self._is_cancelled = False
 
     @property
     def speed(self):
@@ -51,7 +53,7 @@ class TelegramDownloadHelper:
             LOGGER.info(f"Start Queued Download from Telegram: {self._listener.name}")
 
     async def _on_download_progress(self, current, total):
-        if self._listener.is_cancelled:
+        if self._is_cancelled:
             if self.session == "user":
                 user.stop_transmission()
             else:
@@ -67,27 +69,39 @@ class TelegramDownloadHelper:
     async def _on_download_complete(self):
         await self._listener.on_download_complete()
         async with global_lock:
-            GLOBAL_GID.remove(self._id)
+            if self._id in GLOBAL_GID:
+                GLOBAL_GID.remove(self._id)
 
     async def _download(self, message, path):
         try:
             download = await message.download(
                 file_name=path, progress=self._on_download_progress
             )
-            if self._listener.is_cancelled:
+            if self._is_cancelled:
                 await self._on_download_error("Cancelled by user!")
-                return
+                return False
         except FloodWait as f:
-            LOGGER.warning(str(f))
+            LOGGER.warning(f"FloodWait: {f}. Retrying after {f.value} seconds.")
             await sleep(f.value)
+            return await self._download(message, path) # Retry logic
+        except RPCError as e:
+            LOGGER.error(f"RPCError during download: {e}\n{traceback.format_exc()}")
+            await self._on_download_error(f"RPCError: {e}")
+            return False
         except Exception as e:
-            LOGGER.error(str(e))
+            LOGGER.error(f"An unexpected error occurred during download: {e}\n{traceback.format_exc()}")
             await self._on_download_error(str(e))
-            return
+            return False
+
         if download is not None:
+            LOGGER.info(f"Download successful: {self._listener.name}")
             await self._on_download_complete()
-        elif not self._listener.is_cancelled:
+            return True
+        elif not self._is_cancelled:
+            LOGGER.error("Download failed with an internal error.")
             await self._on_download_error("Internal error occurred")
+            return False
+        return False
 
     async def add_download(self, message, path, session, name="", caption=""):
         self.session = session
@@ -120,18 +134,16 @@ class TelegramDownloadHelper:
                 download = media.file_unique_id not in GLOBAL_GID
 
             if download:
-                # This logic now prioritizes the name passed directly for channel leech
                 if name:
                     self._listener.name = name
-                    path = path + self._listener.name
+                    path = os.path.join(path, self._listener.name)
                 elif self._listener.name == "":
                     self._listener.name = (
-                        media.file_name if hasattr(media, "file_name") else "None"
+                        media.file_name if hasattr(media, "file_name") and media.file_name else "None"
                     )
                 else:
-                    path = path + self._listener.name
+                    path = os.path.join(path, self._listener.name)
 
-                # Set caption if passed directly
                 if caption:
                     self._listener.caption = caption
 
@@ -141,7 +153,7 @@ class TelegramDownloadHelper:
                 msg, button = await stop_duplicate_check(self._listener)
                 if msg:
                     await self._listener.on_download_error(msg, button)
-                    return
+                    return False
 
                 add_to_queue, event = await check_running_tasks(self._listener)
                 if add_to_queue:
@@ -154,23 +166,22 @@ class TelegramDownloadHelper:
                     if self._listener.multi <= 1:
                         await send_status_message(self._listener.message)
                     await event.wait()
-                    if self._listener.is_cancelled:
-                        async with global_lock:
-                            if self._id in GLOBAL_GID:
-                                GLOBAL_GID.remove(self._id)
-                        return
+                    if self._is_cancelled:
+                        return False
 
                 await self._on_download_start(gid, add_to_queue)
-                await self._download(message, path)
+                return await self._download(message, path)
             else:
                 await self._on_download_error("File already being downloaded!")
+                return False
         else:
             await self._on_download_error(
-                "No document in the replied message! Use SuperGroup incase you are trying to download with User session!"
+                "No document in the replied message! Use SuperGroup in case you are trying to download with User session!"
             )
+            return False
 
     async def cancel_task(self):
-        self._listener.is_cancelled = True
+        self._is_cancelled = True
         LOGGER.info(
             f"Cancelling download on user request: name: {self._listener.name} id: {self._id}"
         )
