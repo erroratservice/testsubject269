@@ -66,9 +66,9 @@ class TelegramDownloadHelper:
             await self._listener.on_download_start()
             if self._listener.multi <= 1:
                 await send_status_message(self._listener.message)
-            LOGGER.info(f"Download from Telegram: {self._listener.name}")
-        else:
-            LOGGER.info(f"Start Queued Download from Telegram: {self._listener.name}")
+            # LOGGER.info(f"Download from Telegram: {self._listener.name}")
+        # else:
+            # LOGGER.info(f"Start Queued Download from Telegram: {self._listener.name}")
 
     async def _on_download_progress(self, current, total):
         if self._listener.is_cancelled:
@@ -136,23 +136,19 @@ class TelegramDownloadHelper:
         )
         
         if media is not None:
-            # UNIVERSAL CHANGE: Use deterministic GID for ALL Telegram downloads
             chat_id, message_id = extract_telegram_ids_from_message(message)
             
             if chat_id and message_id:
-                # Generate deterministic GID based on chat_id and message_id
                 gid = generate_universal_telegram_gid(chat_id, message_id)
-                LOGGER.info(f"[TELEGRAM-GID] Generated universal GID: {gid} (chat_id={chat_id}, message_id={message_id})")
+                # LOGGER.info(f"[TELEGRAM-GID] Generated universal GID: {gid} (chat_id={chat_id}, message_id={message_id})")
             else:
-                # Fallback to original method if extraction fails
                 gid = media.file_unique_id
-                LOGGER.warning(f"[TELEGRAM-GID] Fallback to file_unique_id: {gid}")
+                # LOGGER.warning(f"[TELEGRAM-GID] Fallback to file_unique_id: {gid}")
             
             async with global_lock:
                 download = gid not in GLOBAL_GID
                 
             if download:
-                # Enhanced naming logic for channel leech compatibility
                 if name:
                     self._listener.name = name
                     path = path + self._listener.name
@@ -163,7 +159,6 @@ class TelegramDownloadHelper:
                 else:
                     path = path + self._listener.name
                     
-                # Set caption if passed directly  
                 if caption:
                     self._listener.caption = caption
                     
@@ -176,7 +171,7 @@ class TelegramDownloadHelper:
                     
                 add_to_queue, event = await check_running_tasks(self._listener)
                 if add_to_queue:
-                    LOGGER.info(f"Added to Queue/Download: {self._listener.name}")
+                    # LOGGER.info(f"Added to Queue/Download: {self._listener.name}")
                     async with task_dict_lock:
                         task_dict[self._listener.mid] = QueueStatus(
                             self._listener, gid, "dl"
