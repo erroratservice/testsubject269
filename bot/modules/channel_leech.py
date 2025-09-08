@@ -419,10 +419,84 @@ class SmartChannelLeechCoordinator(TaskListener):
                 i += 1
         return parsed
 
+    def cancel_task(self):
+        """Cancel the channel leech coordination"""
+        self.is_cancelled = True
+        LOGGER.info(f"[SMART-LEECH] Task cancelled for {self.channel_id}")
+
+class ChannelScanListener(TaskListener):
+    """Simple channel scanner for database building"""
+    
+    def __init__(self, client, message):
+        self.client = client
+        self.message = message
+        self.channel_id = None
+        self.filter_tags = []
+        self.scanner = None
+        super().__init__()
+
+    async def new_event(self):
+        """Handle scan command with task ID assignment"""
+        text = self.message.text.split()
+        
+        if len(text) < 2:
+            usage_text = (
+                "**Usage:** `/scan <channel_id> [filter]`\n\n"
+                "**Examples:**\n"
+                "`/scan @my_channel`\n"
+                "`/scan -1001234567890`\n"
+                "`/scan @movies_channel movie`\n\n"
+                "**Purpose:** Build file database for duplicate detection"
+            )
+            await send_message(self.message, usage_text)
+            return
+
+        self.channel_id = text[1]
+        self.filter_tags = text[2:] if len(text) > 2 else []
+
+        if not user:
+            await send_message(self.message, "User session is required for channel scanning!")
+            return
+
+        filter_text = f" with filter: {' '.join(self.filter_tags)}" if self.filter_tags else ""
+        status_msg = await send_message(
+            self.message, 
+            f"🔍 Starting scan `{str(self.mid)[:12]}`\n"
+            f"**Channel:** `{self.channel_id}`{filter_text}\n"
+            f"**Cancel with:** `/cancel {str(self.mid)[:12]}`"
+        )
+
+        try:
+            self.scanner = ChannelScanner(user, self.channel_id, filter_tags=self.filter_tags)
+            self.scanner.listener = self
+            await self.scanner.scan(status_msg)
+            
+        except Exception as e:
+            LOGGER.error(f"[CHANNEL-SCANNER] Error: {e}")
+            await edit_message(status_msg, f"❌ Scan failed: {str(e)}")
+
+    def cancel_task(self):
+        """Cancel the scan operation"""
+        self.is_cancelled = True
+        if self.scanner:
+            self.scanner.running = False
+        LOGGER.info(f"[CHANNEL-SCANNER] Scan cancelled for {self.channel_id}")
+
+@new_task
+async def channel_scan(client, message):
+    """Handle /scan command with task ID support"""
+    await ChannelScanListener(user, message).new_event()
+
 @new_task
 async def smart_channel_leech_cmd(client, message):
     """Handle /cleech with INCOMPLETE_TASK_NOTIFIER tracking"""
     await SmartChannelLeechCoordinator(client, message).new_event()
+
+# Register BOTH handlers
+bot.add_handler(MessageHandler(
+    channel_scan,
+    filters=command("scan") & CustomFilters.authorized
+))
 
 bot.add_handler(MessageHandler(
     smart_channel_leech_cmd, 
