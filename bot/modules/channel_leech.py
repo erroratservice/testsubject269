@@ -12,6 +12,7 @@ from ..helper.listeners.task_listener import TaskListener
 import asyncio
 import os
 import re
+import time
 
 def remove_emoji(text):
     """Remove emojis and special characters from text"""
@@ -67,8 +68,8 @@ def sanitize_filename(filename):
     
     return filename
 
-class ChannelLeechCoordinator(TaskListener):
-    """Smart coordinator that scans channels and feeds links to internal leech system"""
+class SmartChannelLeechCoordinator(TaskListener):
+    """Uses existing INCOMPLETE_TASK_NOTIFIER system for perfect tracking"""
     
     def __init__(self, client, message):
         self.client = client
@@ -78,17 +79,23 @@ class ChannelLeechCoordinator(TaskListener):
         self.status_message = None
         self.operation_key = None
         self.use_caption_as_filename = True
-        self.batch_size = 3           # Links per batch
-        self.batch_delay = 5          # Seconds between batches
-        self.link_delay = 2           # Seconds between individual links
         
-        # Inherit from TaskListener for proper user context
+        # Simple concurrency management
+        self.max_concurrent = 2           # Max active downloads
+        self.check_interval = 5           # Check every 5 seconds
+        
+        # Track our downloads using existing INCOMPLETE_TASK_NOTIFIER
+        self.pending_files = []           # Files waiting to start
+        self.our_active_gids = set()      # GIDs we started
+        self.completed_count = 0
+        self.total_files = 0
+        
         super().__init__()
         
-        LOGGER.info(f"[CHANNEL-COORDINATOR] Created coordinator task {self.mid}")
+        LOGGER.info(f"[SMART-LEECH] Using INCOMPLETE_TASK_NOTIFIER - max {self.max_concurrent} concurrent")
 
     async def new_event(self):
-        """Main channel leech coordinator event handler"""
+        """Main event handler"""
         text = self.message.text.split()
         args = self._parse_arguments(text[1:])
 
@@ -97,14 +104,12 @@ class ChannelLeechCoordinator(TaskListener):
                 "**Usage:** `/cleech -ch <channel_id> [-f filter_text] [--no-caption]`\n\n"
                 "**Examples:**\n"
                 "`/cleech -ch @movies_channel`\n"
-                "`/cleech -ch @movies_channel -f 2024 BluRay`\n"
-                "`/cleech -ch -1001234567890 -f movie --no-caption`\n\n"
+                "`/cleech -ch @movies_channel -f 2024 BluRay`\n\n"
                 "**Features:**\n"
-                "• Uses internal leech system for reliable downloads\n"
+                "• Uses existing INCOMPLETE_TASK_NOTIFIER system\n"
+                "• Perfect integration with your bot's infrastructure\n"
                 "• Clean dot-separated filenames\n"
-                "• All user settings automatically applied\n"
-                "• Each file gets individual progress tracking\n"
-                "• Built-in concurrency and error handling"
+                "• Real-time progress tracking via existing database"
             )
             await send_message(self.message, usage_text)
             return
@@ -114,80 +119,64 @@ class ChannelLeechCoordinator(TaskListener):
         self.use_caption_as_filename = not args.get('no_caption', False)
 
         if not user:
-            await send_message(self.message, "User session is required for channel access!")
+            await send_message(self.message, "User session required!")
             return
 
-        # Start operation tracking
+        # Start operation
         self.operation_key = await channel_status.start_operation(
-            self.message.from_user.id, self.channel_id, "channel_leech_coordinator"
+            self.message.from_user.id, self.channel_id, "smart_channel_leech"
         )
 
         filter_text = f" with filter: {' '.join(self.filter_tags)}" if self.filter_tags else ""
-        caption_mode = "clean dot-separated filenames" if self.use_caption_as_filename else "original filenames"
         
         self.status_message = await send_message(
             self.message, 
-            f"🚀 **Channel Leech Coordinator** `{str(self.mid)[:12]}`\n"
+            f"🧠 **Smart Channel Leech** `{str(self.mid)[:12]}`\n"
             f"**Channel:** `{self.channel_id}`{filter_text}\n"
-            f"**System:** Internal Leech Pipeline\n"
-            f"**Filename mode:** {caption_mode}\n"
-            f"**Batch size:** {self.batch_size} files\n"
-            f"**Cancel with:** `/cancel {str(self.mid)[:12]}`"
+            f"**System:** INCOMPLETE_TASK_NOTIFIER tracking\n"
+            f"**Max concurrent:** {self.max_concurrent} downloads\n"
+            f"**Cancel:** `/cancel {str(self.mid)[:12]}`"
         )
 
         try:
-            await self._coordinate_channel_leech()
+            await self._coordinate_smart_leech()
         except Exception as e:
-            LOGGER.error(f"[CHANNEL-COORDINATOR] Error: {e}")
+            LOGGER.error(f"[SMART-LEECH] Error: {e}")
             await edit_message(self.status_message, f"❌ Error: {str(e)}")
         finally:
             if self.operation_key:
                 await channel_status.stop_operation(self.operation_key)
 
-    async def _coordinate_channel_leech(self):
-        """Coordinate channel scanning and link generation"""
+    async def _coordinate_smart_leech(self):
+        """Main coordination using INCOMPLETE_TASK_NOTIFIER"""
         processed = 0
-        queued = 0
         skipped = 0
         
         try:
-            # Get channel info
+            # Get channel info and scan
             chat = await user.get_chat(self.channel_id)
-            await edit_message(
-                self.status_message,
-                f"🔍 **Scanning channel:** {chat.title}\n"
-                f"Filtering and generating message links..."
-            )
+            await edit_message(self.status_message, f"🔍 **Scanning:** {chat.title}")
             
-            # Initialize scanner
+            # Build file list
             scanner = ChannelScanner(user, self.channel_id, filter_tags=self.filter_tags)
-            message_links = []
             
-            # Scan channel and collect matching files
             async for message in user.get_chat_history(self.channel_id):
                 if self.is_cancelled:
-                    LOGGER.info("[CHANNEL-COORDINATOR] Operation cancelled by user")
                     break
                 
                 processed += 1
                 
-                if processed % 50 == 0:  # Update every 50 messages
-                    await channel_status.update_operation(
-                        self.operation_key, processed=processed
-                    )
-                
-                # Extract file info
+                # Extract and filter files
                 file_info = await scanner._extract_file_info(message)
                 if not file_info:
                     continue
                 
-                # Apply filters
                 if self.filter_tags:
                     search_text = file_info['search_text'].lower()
                     if not all(tag.lower() in search_text for tag in self.filter_tags):
                         continue
                 
-                # Check for duplicates
+                # Check duplicates
                 exists = await database.check_file_exists(
                     file_info.get('file_unique_id'),
                     file_info.get('file_hash'),
@@ -199,136 +188,177 @@ class ChannelLeechCoordinator(TaskListener):
                     continue
                 
                 # Generate message link
-                # Handle both private channels (-100) and public channels
                 if str(self.channel_id).startswith('-100'):
-                    # Private channel: use full ID without -100 prefix
-                    clean_channel_id = str(self.channel_id)[4:]  # Remove -100 prefix
+                    clean_channel_id = str(self.channel_id)[4:]
                 else:
-                    # Public channel: use as-is (username or clean ID)
                     clean_channel_id = str(self.channel_id).replace('@', '')
                 
                 message_link = f"https://t.me/{clean_channel_id}/{message.id}"
                 
-                # Prepare link with metadata
-                link_data = {
+                # Add to pending queue
+                file_item = {
                     'url': message_link,
                     'filename': file_info['file_name'],
                     'message_id': message.id,
                     'file_info': file_info
                 }
                 
-                message_links.append(link_data)
-                queued += 1
-                
-                LOGGER.info(f"[CHANNEL-COORDINATOR] Queued: {file_info['file_name']} -> {message_link}")
+                self.pending_files.append(file_item)
             
-            # Send collected links to internal leech system in batches
-            if message_links:
-                await self._send_links_to_leech_system(message_links)
+            self.total_files = len(self.pending_files)
             
-            # Final status update
-            final_text = (
-                f"✅ **Channel Leech Coordinator Completed!**\n\n"
-                f"**Scanned messages:** {processed}\n"
-                f"**Files queued for download:** {queued}\n"
-                f"**Skipped (duplicates):** {skipped}\n\n"
-                f"**Channel:** `{self.channel_id}`\n"
-                f"**System:** Files sent to internal leech system\n"
-                f"**Note:** Each file now has its own download task with individual progress tracking"
-            )
-            await edit_message(self.status_message, final_text)
+            if self.total_files == 0:
+                await edit_message(self.status_message, "✅ No new files to download!")
+                return
             
-            LOGGER.info(f"[CHANNEL-COORDINATOR] Completed - {queued} files queued")
+            LOGGER.info(f"[SMART-LEECH] Found {self.total_files} files, using INCOMPLETE_TASK_NOTIFIER for tracking")
             
-        except FloodWait as e:
-            LOGGER.warning(f"[CHANNEL-COORDINATOR] FloodWait: {e.x}s")
-            await edit_message(self.status_message, f"⏱️ Rate limited, waiting {e.x} seconds...")
-            await asyncio.sleep(e.x + 1)
-            LOGGER.info("[CHANNEL-COORDINATOR] Resumed after FloodWait")
+            # Start smart processing
+            await self._process_with_incomplete_task_tracking()
             
         except Exception as e:
-            LOGGER.error(f"[CHANNEL-COORDINATOR] Processing error: {str(e)}")
+            LOGGER.error(f"[SMART-LEECH] Error: {e}")
             await edit_message(self.status_message, f"❌ Error: {str(e)}")
 
-    async def _send_links_to_leech_system(self, message_links):
-        """Send message links to internal leech system in controlled batches"""
-        total_links = len(message_links)
-        sent_count = 0
+    async def _process_with_incomplete_task_tracking(self):
+        """Process files using INCOMPLETE_TASK_NOTIFIER for completion detection"""
         
-        LOGGER.info(f"[CHANNEL-COORDINATOR] Sending {total_links} links to internal leech system")
+        # Start initial downloads (up to max_concurrent)
+        while len(self.our_active_gids) < self.max_concurrent and self.pending_files:
+            await self._start_next_download()
         
-        # Process in batches
-        for i in range(0, total_links, self.batch_size):
-            if self.is_cancelled:
-                break
+        # Monitor loop - check INCOMPLETE_TASK_NOTIFIER for completions
+        while (self.our_active_gids or self.pending_files) and not self.is_cancelled:
+            
+            # Check which of our GIDs completed by querying INCOMPLETE_TASK_NOTIFIER
+            completed_gids = await self._check_completed_via_incomplete_task_notifier()
+            
+            # Start new downloads for completed slots
+            for _ in range(len(completed_gids)):
+                if self.pending_files and len(self.our_active_gids) < self.max_concurrent:
+                    await self._start_next_download()
+            
+            # Update progress
+            await self._update_progress()
+            
+            # Wait before next check
+            await asyncio.sleep(self.check_interval)
+        
+        # Show final results
+        await self._show_final_results()
+
+    async def _start_next_download(self):
+        """Start next download and track with our GID set"""
+        if not self.pending_files:
+            return
+        
+        file_item = self.pending_files.pop(0)
+        
+        try:
+            # Generate leech command
+            if self.use_caption_as_filename:
+                clean_name = self._generate_clean_filename(
+                    file_item['file_info'], file_item['message_id']
+                )
+                leech_cmd = f"/leech {file_item['url']} -n \"{clean_name}\""
+            else:
+                leech_cmd = f"/leech {file_item['url']}"
+            
+            # Execute leech command
+            gid = await self._execute_leech_command(leech_cmd)
+            
+            if gid:
+                # Add GID to our tracking set
+                self.our_active_gids.add(gid)
                 
-            batch = message_links[i:i + self.batch_size]
-            batch_num = (i // self.batch_size) + 1
-            total_batches = (total_links + self.batch_size - 1) // self.batch_size
+                LOGGER.info(f"[SMART-LEECH] Started {gid}: {file_item['filename'][:50]}... (tracking via INCOMPLETE_TASK_NOTIFIER)")
+            else:
+                # Failed to start - add back to queue
+                self.pending_files.append(file_item)
+                LOGGER.warning(f"[SMART-LEECH] Failed to start: {file_item['filename']}")
+        
+        except Exception as e:
+            LOGGER.error(f"[SMART-LEECH] Error starting download: {e}")
+            # Add back to queue for retry
+            self.pending_files.append(file_item)
+
+    async def _check_completed_via_incomplete_task_notifier(self):
+        """Check which of our GIDs completed by querying INCOMPLETE_TASK_NOTIFIER"""
+        completed_gids = []
+        
+        try:
+            # Get all current incomplete tasks from your existing system
+            current_incomplete_tasks = await database.get_incomplete_tasks()
             
-            LOGGER.info(f"[CHANNEL-COORDINATOR] Processing batch {batch_num}/{total_batches}")
+            # Extract all current incomplete GIDs from the notifier
+            current_incomplete_gids = set()
+            for cid_data in current_incomplete_tasks.values():
+                for tag_data in cid_data.values():
+                    current_incomplete_gids.update(tag_data)
             
-            # Update status
-            await edit_message(
-                self.status_message,
-                f"🔄 **Sending files to leech system...**\n"
-                f"**Progress:** {sent_count}/{total_links} files\n"
-                f"**Batch:** {batch_num}/{total_batches}\n"
-                f"**Current batch:** {len(batch)} files"
+            # Check which of our GIDs are no longer in the incomplete tasks
+            for gid in list(self.our_active_gids):
+                if gid not in current_incomplete_gids:
+                    # GID no longer in INCOMPLETE_TASK_NOTIFIER = completed!
+                    self.our_active_gids.remove(gid)
+                    completed_gids.append(gid)
+                    self.completed_count += 1
+                    
+                    LOGGER.info(f"[SMART-LEECH] Completed {gid} (removed from INCOMPLETE_TASK_NOTIFIER)")
+        
+        except Exception as e:
+            LOGGER.error(f"[SMART-LEECH] Error checking INCOMPLETE_TASK_NOTIFIER: {e}")
+        
+        return completed_gids
+
+    async def _update_progress(self):
+        """Update user with current progress"""
+        try:
+            active_count = len(self.our_active_gids)
+            pending_count = len(self.pending_files)
+            progress_percentage = (self.completed_count / self.total_files * 100) if self.total_files > 0 else 0
+            
+            progress_text = (
+                f"🧠 **Smart Channel Leech Progress**\n\n"
+                f"**Progress:** {self.completed_count}/{self.total_files} ({progress_percentage:.1f}%)\n"
+                f"**🔄 Active:** {active_count}/{self.max_concurrent}\n"
+                f"**⏳ Pending:** {pending_count}\n"
+                f"**✅ Completed:** {self.completed_count}\n\n"
+                f"**System:** INCOMPLETE_TASK_NOTIFIER tracking\n"
             )
             
-            # Send each link in the batch
-            for link_data in batch:
-                if self.is_cancelled:
-                    break
-                
-                try:
-                    # Generate leech command with cleaned filename parameter
-                    if self.use_caption_as_filename:
-                        # Generate clean filename
-                        clean_name = self._generate_clean_filename(
-                            link_data['file_info'], link_data['message_id']
-                        )
-                        # Use -n parameter to specify custom filename
-                        leech_cmd = f"/leech {link_data['url']} -n \"{clean_name}\""
-                    else:
-                        # Use original filename (internal system handles)
-                        leech_cmd = f"/leech {link_data['url']}"
-                    
-                    # Send to internal leech system
-                    await self._execute_internal_leech_command(leech_cmd)
-                    
-                    # Add to database to track as processed
-                    await database.add_file_entry(
-                        self.channel_id, 
-                        link_data['message_id'], 
-                        link_data['file_info']
-                    )
-                    
-                    sent_count += 1
-                    
-                    LOGGER.info(f"[CHANNEL-COORDINATOR] Queued: {leech_cmd}")
-                    
-                    # Small delay between individual links
-                    await asyncio.sleep(self.link_delay)
-                    
-                except Exception as e:
-                    LOGGER.error(f"[CHANNEL-COORDINATOR] Failed to send {link_data['url']}: {e}")
+            if self.our_active_gids:
+                progress_text += "**Active Downloads:**\n"
+                for i, gid in enumerate(list(self.our_active_gids)):
+                    if i < 3:  # Show max 3 active
+                        progress_text += f"📥 `{gid[:12]}...`\n"
             
-            # Delay between batches
-            if i + self.batch_size < total_links and not self.is_cancelled:
-                LOGGER.info(f"[CHANNEL-COORDINATOR] Waiting {self.batch_delay}s before next batch...")
-                await asyncio.sleep(self.batch_delay)
-        
-        LOGGER.info(f"[CHANNEL-COORDINATOR] Finished sending {sent_count}/{total_links} links")
+            await edit_message(self.status_message, progress_text)
+            
+        except Exception as e:
+            LOGGER.error(f"[SMART-LEECH] Error updating progress: {e}")
 
-    async def _execute_internal_leech_command(self, leech_command):
-        """Execute leech command through internal bot system"""
+    async def _show_final_results(self):
+        """Show final results"""
+        success_rate = (self.completed_count / self.total_files * 100) if self.total_files > 0 else 0
+        
+        final_text = (
+            f"✅ **Smart Channel Leech Completed!**\n\n"
+            f"**Total Files:** {self.total_files}\n"
+            f"**✅ Downloaded:** {self.completed_count}\n"
+            f"**📊 Success Rate:** {success_rate:.1f}%\n\n"
+            f"**System:** INCOMPLETE_TASK_NOTIFIER tracking\n"
+            f"**Max Concurrent:** {self.max_concurrent}\n\n"
+            f"Perfect integration with existing bot infrastructure!"
+        )
+        
+        await edit_message(self.status_message, final_text)
+
+    async def _execute_leech_command(self, leech_command):
+        """Execute leech command and return GID"""
         try:
-            # Import your bot's leech handler
             from ..modules.mirror_leech import mirror_leech_cmd
             
-            # Create simulated message object with the leech command
             fake_message = type('obj', (object,), {
                 'text': leech_command,
                 'from_user': self.message.from_user,
@@ -336,39 +366,33 @@ class ChannelLeechCoordinator(TaskListener):
                 'reply_to_message': None,
             })
             
-            # Execute leech command through internal system
-            await mirror_leech_cmd(self.client, fake_message)
+            # Execute and get task listener with GID
+            task_listener = await mirror_leech_cmd(self.client, fake_message)
+            return getattr(task_listener, 'mid', None) if task_listener else None
             
         except Exception as e:
-            LOGGER.error(f"[CHANNEL-COORDINATOR] Internal leech execution failed: {e}")
-            # Alternative: You might need to implement alternative method based on your bot architecture
+            LOGGER.error(f"[SMART-LEECH] Failed to execute: {e}")
+            return None
 
     def _generate_clean_filename(self, file_info, message_id):
-        """Generate clean filename with proper extension handling"""
+        """Generate clean filename"""
         original_filename = file_info['file_name']
         
         if self.use_caption_as_filename:
-            # Try to extract filename from caption or search text
             caption_text = file_info.get('search_text', original_filename)
             first_line = caption_text.split('\n')[0].strip()
             
             if first_line and len(first_line) >= 3:
-                # Clean the caption text - creates clean dot-separated names
                 clean_name = sanitize_filename(first_line)
                 if clean_name:
-                    # Get extension from original filename
                     original_extension = os.path.splitext(original_filename)[1]
-                    
-                    # Add extension if not present
                     if not clean_name.lower().endswith(original_extension.lower()):
                         clean_name = clean_name + original_extension
                     
-                    # Add message ID for uniqueness (before extension)
                     name_part = os.path.splitext(clean_name)[0]
                     ext_part = os.path.splitext(clean_name)[1]
                     return f"{name_part}.{message_id}{ext_part}"
         
-        # Fallback to sanitized original filename
         clean_name = sanitize_filename(original_filename)
         name_part = os.path.splitext(clean_name)[0]
         ext_part = os.path.splitext(clean_name)[1]
@@ -378,7 +402,6 @@ class ChannelLeechCoordinator(TaskListener):
         """Parse command arguments"""
         parsed = {}
         i = 0
-        
         while i < len(args):
             if args[i] == '-ch' and i + 1 < len(args):
                 parsed['channel'] = args[i + 1]
@@ -394,89 +417,14 @@ class ChannelLeechCoordinator(TaskListener):
                 i += 1
             else:
                 i += 1
-                
         return parsed
 
-    def cancel_task(self):
-        """Cancel the channel leech coordination"""
-        self.is_cancelled = True
-        LOGGER.info(f"[CHANNEL-COORDINATOR] Task cancelled for {self.channel_id}")
-
-class ChannelScanListener(TaskListener):
-    """Simple channel scanner for database building"""
-    
-    def __init__(self, client, message):
-        self.client = client
-        self.message = message
-        self.channel_id = None
-        self.filter_tags = []
-        self.scanner = None
-        super().__init__()
-
-    async def new_event(self):
-        """Handle scan command with task ID assignment"""
-        text = self.message.text.split()
-        
-        if len(text) < 2:
-            usage_text = (
-                "**Usage:** `/scan <channel_id> [filter]`\n\n"
-                "**Examples:**\n"
-                "`/scan @my_channel`\n"
-                "`/scan -1001234567890`\n"
-                "`/scan @movies_channel movie`\n\n"
-                "**Purpose:** Build file database for duplicate detection"
-            )
-            await send_message(self.message, usage_text)
-            return
-
-        self.channel_id = text[1]
-        self.filter_tags = text[2:] if len(text) > 2 else []
-
-        if not user:
-            await send_message(self.message, "User session is required for channel scanning!")
-            return
-
-        filter_text = f" with filter: {' '.join(self.filter_tags)}" if self.filter_tags else ""
-        status_msg = await send_message(
-            self.message, 
-            f"🔍 Starting scan `{str(self.mid)[:12]}`\n"
-            f"**Channel:** `{self.channel_id}`{filter_text}\n"
-            f"**Cancel with:** `/cancel {str(self.mid)[:12]}`"
-        )
-
-        try:
-            self.scanner = ChannelScanner(user, self.channel_id, filter_tags=self.filter_tags)
-            self.scanner.listener = self
-            await self.scanner.scan(status_msg)
-            
-        except Exception as e:
-            LOGGER.error(f"[CHANNEL-SCANNER] Error: {e}")
-            await edit_message(status_msg, f"❌ Scan failed: {str(e)}")
-
-    def cancel_task(self):
-        """Cancel the scan operation"""
-        self.is_cancelled = True
-        if self.scanner:
-            self.scanner.running = False
-        LOGGER.info(f"[CHANNEL-SCANNER] Scan cancelled for {self.channel_id}")
-
 @new_task
-async def channel_scan(client, message):
-    """Handle /scan command with task ID support"""
-    await ChannelScanListener(user, message).new_event()
-
-@new_task
-async def channel_leech_cmd(client, message):
-    """Handle /cleech command - uses internal leech system via message links"""
-    await ChannelLeechCoordinator(client, message).new_event()
-
-# Register handlers
-bot.add_handler(MessageHandler(
-    channel_scan,
-    filters=command("scan") & CustomFilters.authorized
-))
+async def smart_channel_leech_cmd(client, message):
+    """Handle /cleech with INCOMPLETE_TASK_NOTIFIER tracking"""
+    await SmartChannelLeechCoordinator(client, message).new_event()
 
 bot.add_handler(MessageHandler(
-    channel_leech_cmd, 
+    smart_channel_leech_cmd, 
     filters=command("cleech") & CustomFilters.authorized
 ))
