@@ -1,7 +1,8 @@
+import hashlib
+import re
 from asyncio import Lock, sleep
 from time import time
 from pyrogram.errors import FloodWait
-
 from bot import (
     LOGGER,
     task_dict,
@@ -17,6 +18,25 @@ from ...telegram_helper.message_utils import send_status_message
 global_lock = Lock()
 GLOBAL_GID = set()
 
+def generate_universal_telegram_gid(chat_id: int, message_id: int) -> str:
+    """
+    Generate deterministic GID for ALL Telegram downloads
+    This ensures perfect tracking for both channel leech and regular downloads
+    """
+    combined = f"tg_{chat_id}_{message_id}"
+    hash_obj = hashlib.sha256(combined.encode('utf-8'))
+    gid = hash_obj.hexdigest()[:12]
+    return gid
+
+def extract_telegram_ids_from_message(message) -> tuple:
+    """Extract chat_id and message_id from Telegram message object"""
+    try:
+        chat_id = message.chat.id
+        message_id = message.id
+        return chat_id, message_id
+    except Exception as e:
+        LOGGER.error(f"[TELEGRAM-GID] Failed to extract IDs: {e}")
+        return None, None
 
 class TelegramDownloadHelper:
     def __init__(self, listener):
@@ -102,7 +122,7 @@ class TelegramDownloadHelper:
             )
         elif self.session != "user":
             self.session = "bot"
-
+            
         media = (
             message.document
             or message.photo
@@ -114,13 +134,25 @@ class TelegramDownloadHelper:
             or message.animation
             or None
         )
-
+        
         if media is not None:
+            # UNIVERSAL CHANGE: Use deterministic GID for ALL Telegram downloads
+            chat_id, message_id = extract_telegram_ids_from_message(message)
+            
+            if chat_id and message_id:
+                # Generate deterministic GID based on chat_id and message_id
+                gid = generate_universal_telegram_gid(chat_id, message_id)
+                LOGGER.info(f"[TELEGRAM-GID] Generated universal GID: {gid} (chat_id={chat_id}, message_id={message_id})")
+            else:
+                # Fallback to original method if extraction fails
+                gid = media.file_unique_id
+                LOGGER.warning(f"[TELEGRAM-GID] Fallback to file_unique_id: {gid}")
+            
             async with global_lock:
-                download = media.file_unique_id not in GLOBAL_GID
-
+                download = gid not in GLOBAL_GID
+                
             if download:
-                # This logic now prioritizes the name passed directly for channel leech
+                # Enhanced naming logic for channel leech compatibility
                 if name:
                     self._listener.name = name
                     path = path + self._listener.name
@@ -130,19 +162,18 @@ class TelegramDownloadHelper:
                     )
                 else:
                     path = path + self._listener.name
-
-                # Set caption if passed directly
+                    
+                # Set caption if passed directly  
                 if caption:
                     self._listener.caption = caption
-
+                    
                 self._listener.size = media.file_size
-                gid = media.file_unique_id
-
+                
                 msg, button = await stop_duplicate_check(self._listener)
                 if msg:
                     await self._listener.on_download_error(msg, button)
                     return
-
+                    
                 add_to_queue, event = await check_running_tasks(self._listener)
                 if add_to_queue:
                     LOGGER.info(f"Added to Queue/Download: {self._listener.name}")
@@ -159,7 +190,7 @@ class TelegramDownloadHelper:
                             if self._id in GLOBAL_GID:
                                 GLOBAL_GID.remove(self._id)
                         return
-
+                        
                 await self._on_download_start(gid, add_to_queue)
                 await self._download(message, path)
             else:
