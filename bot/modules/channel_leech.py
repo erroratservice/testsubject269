@@ -41,8 +41,6 @@ def sanitize_filename(filename):
     filename = filename.replace(' ', '.')
     if not filename:
         filename = "file"
-    if len(filename) > 200:
-        filename = filename[:200]
     return filename
 
 class UniversalChannelLeechCoordinator(TaskListener):
