@@ -52,7 +52,6 @@ def sanitize_filename(filename):
     
     return filename
 
-
 class UniversalChannelLeechCoordinator(TaskListener):
     """Universal coordinator for channel leech operations"""
     
@@ -71,6 +70,7 @@ class UniversalChannelLeechCoordinator(TaskListener):
         self.our_active_links = set()
         self.completed_count = 0
         self.total_files = 0
+        self.link_to_file_mapping = {}  # Track file info for database save
         super().__init__()
 
     async def new_event(self):
@@ -200,6 +200,9 @@ class UniversalChannelLeechCoordinator(TaskListener):
             
             self.our_active_links.add(actual_stored_url)
             
+            # Store mapping for database save when completed
+            self.link_to_file_mapping[actual_stored_url] = file_item
+            
         except Exception as e:
             LOGGER.error(f"[cleech] Error starting download: {e}")
             self.pending_files.insert(0, file_item)
@@ -222,6 +225,9 @@ class UniversalChannelLeechCoordinator(TaskListener):
             
             for tracked_link in list(self.our_active_links):
                 if tracked_link not in current_incomplete_links:
+                    # Save completed file to database to prevent re-downloading
+                    await self._save_completed_file(tracked_link)
+                    
                     self.our_active_links.remove(tracked_link)
                     completed_links.append(tracked_link)
                     self.completed_count += 1
@@ -230,6 +236,25 @@ class UniversalChannelLeechCoordinator(TaskListener):
             LOGGER.error(f"[cleech] Error checking completion: {e}")
             
         return completed_links
+
+    async def _save_completed_file(self, completed_link):
+        """Save completed file to database using the same format as channel scanner"""
+        try:
+            if completed_link in self.link_to_file_mapping:
+                file_item = self.link_to_file_mapping[completed_link]
+                
+                # Use the same database.add_file_entry method as channel scanner
+                await database.add_file_entry(
+                    self.channel_chat_id,  # channel_id  
+                    file_item['message_id'],  # message_id from original channel
+                    file_item['file_info']  # file_info with all the scanner fields
+                )
+                
+                # Clean up the mapping
+                del self.link_to_file_mapping[completed_link]
+                
+        except Exception as e:
+            LOGGER.error(f"[cleech] Error saving completed file: {e}")
 
     async def _update_progress(self):
         if not self.status_message: 
@@ -261,8 +286,8 @@ class UniversalChannelLeechCoordinator(TaskListener):
         original_filename = file_info['file_name']
         base_name = original_filename
         
-        if self.use_caption_as_filename and file_info.get('caption'):
-            base_name = file_info['caption'].split('\n')[0].strip()
+        if self.use_caption_as_filename and file_info.get('caption_first_line'):
+            base_name = file_info['caption_first_line'].strip()
         
         clean_base = sanitize_filename(base_name)
         original_ext = os.path.splitext(original_filename)[1]
