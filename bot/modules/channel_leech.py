@@ -13,32 +13,38 @@ import asyncio
 import os
 import re
 
-def remove_emoji(text):
-    """Remove emojis and special characters from text"""
-    emoji_pattern = re.compile(
-        '['
-        '\U0001F600-\U0001F64F'  # emoticons
-        '\U0001F300-\U0001F5FF'  # symbols & pictographs
-        '\U0001F680-\U0001F6FF'  # transport & map symbols
-        '\U0001F1E0-\U0001F1FF'  # flags (iOS)
-        '\U00002702-\U000027B0'  # dingbats
-        '\U000024C2-\U0001F251'  # enclosed characters
-        '\U0001F900-\U0001F9FF'  # supplemental symbols
-        '\U0001FA00-\U0001FA6F'  # chess symbols
-        ']+', flags=re.UNICODE
-    )
-    return emoji_pattern.sub('', text)
-
 def sanitize_filename(filename):
-    """Sanitize filename by creating clean dot-separated names"""
-    filename = remove_emoji(filename)
-    filename = re.sub(r'[_]+', ' ', filename)
-    filename = re.sub(r'[<>:"/\\|?*]', ' ', filename)
-    filename = re.sub(r'\s*\.\s*', '.', filename)
-    filename = re.sub(r'\.{2,}', '.', filename)  
-    filename = re.sub(r'\s+', ' ', filename)
-    filename = filename.strip(' .')
+    """Clean filename sanitization with proper dot conversion"""
+    import re
+    
+    # Remove emojis and special unicode characters
+    emoji_pattern = re.compile(
+        r'['
+        r'\U0001F600-\U0001F64F'  # emoticons
+        r'\U0001F300-\U0001F5FF'  # symbols & pictographs
+        r'\U0001F680-\U0001F6FF'  # transport & map symbols
+        r'\U0001F1E0-\U0001F1FF'  # flags (iOS)
+        r'\u2600-\u26FF\u2700-\u27BF'  # misc symbols
+        r']+', flags=re.UNICODE
+    )
+    filename = emoji_pattern.sub('', filename)
+    
+    # Replace +, -, and spaces with dots
+    filename = filename.replace('+', '.')
+    filename = filename.replace('-', '.')
     filename = filename.replace(' ', '.')
+    
+    # Remove brackets but keep content
+    filename = re.sub(r'[\[\]\(\)\{\}]', '', filename)
+    
+    # Remove filesystem forbidden characters
+    filename = re.sub(r'[<>:"/\\|?*]', '', filename)
+    
+    # Replace multiple consecutive dots with single dot
+    filename = re.sub(r'\.{2,}', '.', filename)
+    
+    # Remove leading and trailing dots
+    filename = filename.strip('.')
     
     if not filename:
         filename = "file"
