@@ -213,7 +213,7 @@ class UniversalChannelLeechCoordinator(TaskListener):
 
             clean_name = self._generate_clean_filename(file_item['file_info'], file_item['message_id'])
             # Patched: Correctly format the command with quotes around the filename
-            leech_cmd = f'/leech {file_item["url"]} -n "{clean_name}"'
+            leech_cmd = f'/leech {file_item["url"]} -n {clean_name}'
             
             self.our_active_gids.add(gid)
             LOGGER.info(f"[cleech] Queued GID: {gid} in command channel.")
