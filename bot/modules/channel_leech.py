@@ -71,6 +71,7 @@ class UniversalChannelLeechCoordinator(TaskListener):
         self.completed_count = 0
         self.total_files = 0
         self.link_to_file_mapping = {}  # Track file info for database save
+        self._last_status_text = ""  # Track last status to prevent MESSAGE_NOT_MODIFIED
         super().__init__()
 
     async def new_event(self):
@@ -125,14 +126,24 @@ class UniversalChannelLeechCoordinator(TaskListener):
                 await channel_status.stop_operation(self.operation_key)
 
     async def _coordinate_universal_leech(self):
-        """Main coordination with database link tracking"""
+        """Main coordination with database link tracking and batch processing"""
         await edit_message(self.status_message, f"**Scanning Channel...**")
         scanner = ChannelScanner(user, self.channel_id, filter_tags=self.filter_tags)
+        
+        # Batch processing configuration
+        batch_size = 30
+        batch_sleep = 2
+        batch_count = 0
+        processed_messages = 0
+        skipped_duplicates = 0
         
         async for message in user.get_chat_history(self.channel_id):
             if self.is_cancelled: 
                 break
                 
+            processed_messages += 1
+            batch_count += 1
+            
             file_info = await scanner._extract_file_info(message)
             if not file_info: 
                 continue
@@ -140,8 +151,15 @@ class UniversalChannelLeechCoordinator(TaskListener):
             if self.filter_tags and not all(tag.lower() in file_info['search_text'].lower() for tag in self.filter_tags):
                 continue
             
-            if await database.check_file_exists(file_info.get('file_unique_id'), file_info.get('file_hash'), file_info.get('file_name')):
+            # DEBUG: Check if file exists
+            file_exists = await database.check_file_exists(file_info.get('file_unique_id'), file_info.get('file_hash'), file_info.get('file_name'))
+            
+            if file_exists:
+                skipped_duplicates += 1
+                LOGGER.info(f"[cleech-debug] Skipping duplicate: {file_info.get('file_name')}")
                 continue
+            else:
+                LOGGER.info(f"[cleech-debug] New file found: {file_info.get('file_name')}")
 
             if str(self.channel_chat_id).startswith('-100'):
                 message_link = f"https://t.me/c/{str(self.channel_chat_id)[4:]}/{message.id}"
@@ -156,12 +174,47 @@ class UniversalChannelLeechCoordinator(TaskListener):
                 'link': message_link
             })
 
+            # Batch processing with status updates and sleep
+            if batch_count >= batch_size:
+                await self._handle_scan_batch_complete(processed_messages, len(self.pending_files), batch_count, skipped_duplicates)
+                batch_count = 0
+                
+                # Sleep after each batch to respect rate limits
+                await asyncio.sleep(batch_sleep)
+
+        # Handle remaining messages if any
+        if batch_count > 0:
+            await self._handle_scan_batch_complete(processed_messages, len(self.pending_files), batch_count, skipped_duplicates)
+
+        LOGGER.info(f"[cleech-debug] Scan complete - Total: {processed_messages}, New: {len(self.pending_files)}, Skipped: {skipped_duplicates}")
+
         self.total_files = len(self.pending_files)
         if self.total_files == 0:
-            await edit_message(self.status_message, "No new files to download!")
+            await edit_message(self.status_message, "**No new files to download!**")
             return
 
+        await edit_message(self.status_message, f"**Found {self.total_files} files. Starting downloads...**")
         await self._process_with_link_tracking()
+
+    async def _handle_scan_batch_complete(self, processed_messages, found_files, batch_count, skipped_duplicates):
+        """Handle scan batch completion with status update"""
+        try:
+            status_text = (
+                f"**Scanning Channel...**\n\n"
+                f"**Scanned:** {processed_messages} messages\n"
+                f"**Found:** {found_files} new files\n"
+                f"**Skipped:** {skipped_duplicates} duplicates\n"
+                f"**Batch:** {batch_count} messages processed"
+            )
+            
+            # Only update if content has changed
+            if self._last_status_text != status_text:
+                await edit_message(self.status_message, status_text)
+                self._last_status_text = status_text
+                
+        except Exception as e:
+            if "MESSAGE_NOT_MODIFIED" not in str(e):
+                LOGGER.error(f"[cleech] Scan status update error: {e}")
 
     async def _process_with_link_tracking(self):
         """Process files using database link tracking"""
@@ -212,6 +265,7 @@ class UniversalChannelLeechCoordinator(TaskListener):
         completed_links = []
         try:
             if database._return:
+                LOGGER.info(f"[cleech-debug] Database not available, skipping completion check")
                 return completed_links
             
             from bot import BOT_ID
@@ -223,8 +277,13 @@ class UniversalChannelLeechCoordinator(TaskListener):
                 async for row in rows:
                     current_incomplete_links.add(row["_id"])
             
+            LOGGER.info(f"[cleech-debug] Current incomplete tasks: {len(current_incomplete_links)}")
+            LOGGER.info(f"[cleech-debug] Our tracked links: {len(self.our_active_links)}")
+            
             for tracked_link in list(self.our_active_links):
                 if tracked_link not in current_incomplete_links:
+                    LOGGER.info(f"[cleech-debug] Detected completion for: {tracked_link}")
+                    
                     # Save completed file to database to prevent re-downloading
                     await self._save_completed_file(tracked_link)
                     
@@ -234,14 +293,22 @@ class UniversalChannelLeechCoordinator(TaskListener):
                     
         except Exception as e:
             LOGGER.error(f"[cleech] Error checking completion: {e}")
+            import traceback
+            LOGGER.error(f"[cleech] Traceback: {traceback.format_exc()}")
             
         return completed_links
 
     async def _save_completed_file(self, completed_link):
         """Save completed file to database using the same format as channel scanner"""
         try:
+            LOGGER.info(f"[cleech-debug] Attempting to save completed file: {completed_link}")
+            
             if completed_link in self.link_to_file_mapping:
                 file_item = self.link_to_file_mapping[completed_link]
+                
+                LOGGER.info(f"[cleech-debug] File mapping found for: {completed_link}")
+                LOGGER.info(f"[cleech-debug] File info: {file_item['file_info'].get('file_name')}")
+                LOGGER.info(f"[cleech-debug] File unique ID: {file_item['file_info'].get('file_unique_id')}")
                 
                 # Use the same database.add_file_entry method as channel scanner
                 await database.add_file_entry(
@@ -250,11 +317,19 @@ class UniversalChannelLeechCoordinator(TaskListener):
                     file_item['file_info']  # file_info with all the scanner fields
                 )
                 
+                LOGGER.info(f"[cleech-debug] Successfully saved file to database: {file_item['file_info'].get('file_name')}")
+                
                 # Clean up the mapping
                 del self.link_to_file_mapping[completed_link]
                 
+            else:
+                LOGGER.error(f"[cleech-debug] No file mapping found for completed link: {completed_link}")
+                LOGGER.error(f"[cleech-debug] Available mappings: {list(self.link_to_file_mapping.keys())}")
+                
         except Exception as e:
             LOGGER.error(f"[cleech] Error saving completed file: {e}")
+            import traceback
+            LOGGER.error(f"[cleech] Traceback: {traceback.format_exc()}")
 
     async def _update_progress(self):
         if not self.status_message: 
@@ -270,9 +345,9 @@ class UniversalChannelLeechCoordinator(TaskListener):
             )
             
             # Only update if content has changed
-            if not hasattr(self, '_last_status_text') or self._last_status_text != text:
+            if self._last_status_text != text:
                 await edit_message(self.status_message, text)
-                self._last_status_text = text  # Store for comparison
+                self._last_status_text = text
                 
         except Exception as e:
             # Still ignore MESSAGE_NOT_MODIFIED errors as backup
