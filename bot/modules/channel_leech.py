@@ -235,6 +235,7 @@ class UniversalChannelLeechCoordinator(TaskListener):
             )
             await edit_message(self.status_message, text)
         except Exception as e:
+            # Ignore MESSAGE_NOT_MODIFIED errors - they're harmless
             if "MESSAGE_NOT_MODIFIED" not in str(e):
                 LOGGER.error(f"[cleech] Progress update error: {e}")
 
