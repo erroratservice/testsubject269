@@ -4,7 +4,8 @@ from pyrogram.errors import FloodWait, RPCError
 
 from bot import (LOGGER, task_dict, task_dict_lock, bot, user,
                  INCOMPLETE_TASK_NOTIFIER)
-from bot.helper.ext_utils.bot_utils import MirrorStatus, get_readable_file_size, get_readable_time
+from bot.helper.ext_utils.status_utils import MirrorStatus
+from bot.helper.ext_utils.bot_utils import get_readable_file_size, get_readable_time
 from bot.helper.ext_utils.db_handler import DbManager
 from bot.helper.ext_utils.task_manager import check_running_tasks, stop_duplicate_check
 from bot.helper.mirror_leech_utils.status_utils.queue_status import QueueStatus
@@ -40,7 +41,6 @@ class TelegramDownloadHelper:
         if not from_queue and self.listener.multi <= 1:
             await sendStatusMessage(self.listener.message)
             LOGGER.info(f"Download from Telegram: {self.listener.name}")
-        # ADDED: Correctly register the task in the database
         if self.listener.isSuperGroup and INCOMPLETE_TASK_NOTIFIER:
             await DbManager().add_incomplete_task(self.listener.message.chat.id, self.listener.message.link, self.listener.tag)
 
@@ -56,7 +56,6 @@ class TelegramDownloadHelper:
         async with global_lock:
             if self._id in GLOBAL_GID:
                 GLOBAL_GID.remove(self._id)
-        # ADDED: Correctly remove the task from the database on error
         if self.listener.isSuperGroup and INCOMPLETE_TASK_NOTIFIER:
             await DbManager().rm_complete_task(self.listener.message.link)
         await self.listener.onDownloadError(error)
@@ -64,7 +63,6 @@ class TelegramDownloadHelper:
     async def _onDownloadComplete(self):
         async with global_lock:
             GLOBAL_GID.remove(self._id)
-        # ADDED: Correctly remove the task from the database on completion
         if self.listener.isSuperGroup and INCOMPLETE_TASK_NOTIFIER:
             await DbManager().rm_complete_task(self.listener.message.link)
         await self.listener.onDownloadComplete()
