@@ -67,7 +67,6 @@ class DbManager:
         # User Data
         if await self._db.users.find_one():
             rows = self._db.users.find({})
-            # return a dict ==> {_id, is_sudo, is_auth, as_doc, thumb, yt_opt, media_group, equal_splits, split_size, rclone, rclone_path, token_pickle, gdrive_id, leech_dest, lperfix, lprefix, excluded_extensions, user_transmission, index_url, default_upload}
             async for row in rows:
                 uid = row["_id"]
                 del row["_id"]
@@ -96,7 +95,6 @@ class DbManager:
             LOGGER.info("Users data has been imported from Database")
         # Rss Data
         if await self._db.rss[BOT_ID].find_one():
-            # return a dict ==> {_id, title: {link, last_feed, last_name, inf, exf, command, paused}
             rows = self._db.rss[BOT_ID].find({})
             async for row in rows:
                 user_id = row["_id"]
@@ -214,7 +212,6 @@ class DbManager:
         if self._return:
             return notifier_dict
         if await self._db.tasks[BOT_ID].find_one():
-            # return a dict ==> {_id, cid, tag}
             rows = self._db.tasks[BOT_ID].find({})
             async for row in rows:
                 if row["cid"] in list(notifier_dict.keys()):
@@ -225,7 +222,7 @@ class DbManager:
                 else:
                     notifier_dict[row["cid"]] = {row["tag"]: [row["_id"]]}
         await self._db.tasks[BOT_ID].drop()
-        return notifier_dict  # return a dict ==> {cid: {tag: [_id, _id, ...]}}
+        return notifier_dict
 
     async def trunc_table(self, name):
         if self._return:
@@ -399,7 +396,6 @@ class DbManager:
                 
             total_failed = await self._db.failed_files.count_documents(query)
             
-            # Group by failure reason
             pipeline = [
                 {"$match": query},
                 {"$group": {"_id": "$failure_reason", "count": {"$sum": 1}}},
@@ -407,7 +403,6 @@ class DbManager:
             ]
             failure_reasons = await self._db.failed_files.aggregate(pipeline).to_list(None)
             
-            # Group by retry count
             retry_pipeline = [
                 {"$match": query},
                 {"$group": {"_id": "$retry_count", "count": {"$sum": 1}}},
