@@ -1,6 +1,6 @@
 from bot import INCOMPLETE_TASK_NOTIFIER
 from ...ext_utils.status_utils import MirrorStatus, get_readable_file_size, get_readable_time
-from bot.helper.ext_utils.db_handler import DbManager
+# DbManager is no longer needed here
 
 class TelegramStatus:
 
@@ -10,12 +10,11 @@ class TelegramStatus:
         self._status = status
         self.listener = listener
         self._size = self.listener.size
-        if self._status == 'dl' and INCOMPLETE_TASK_NOTIFIER:
-            DbManager().add_incomplete_task(self.listener.message.chat.id, self.listener.message.link, self.listener.tag)
+        # REMOVED database call from here
 
     def __del__(self):
-        if self._status == 'dl' and INCOMPLETE_TASK_NOTIFIER:
-            DbManager().rm_complete_task(self.listener.message.link)
+        # REMOVED database call from here
+        pass
 
     def processed_bytes(self):
         return get_readable_file_size(self._obj.processed_bytes)
