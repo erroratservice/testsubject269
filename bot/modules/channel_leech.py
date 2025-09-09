@@ -258,7 +258,15 @@ class UniversalChannelLeechCoordinator(TaskListener):
         clean_base = sanitize_filename(base_name)
         original_ext = os.path.splitext(original_filename)[1]
         
-        if not clean_base.lower().endswith(original_ext.lower()):
+        # Media file extensions commonly found in channels
+        media_extensions = {
+            '.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v',  # Video
+            '.mp3', '.flac', '.wav', '.aac', '.m4a', '.ogg',                 # Audio  
+            '.zip', '.rar', '.7z', '.tar', '.gz'                            # Archives
+        }
+        
+        # Only add extension if it's a valid media extension and not already present
+        if original_ext.lower() in media_extensions and not clean_base.lower().endswith(original_ext.lower()):
             clean_base += original_ext
         
         return clean_base
