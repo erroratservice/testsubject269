@@ -14,7 +14,7 @@ class TelegramStatus:
         self._status = status
 
     def processed_bytes(self):
-        return get_readable_file_size(self._obj.processed_bytes)
+        return get_readable_file_size(self._obj._processed_bytes)
 
     def size(self):
         return get_readable_file_size(self._size)
@@ -29,7 +29,7 @@ class TelegramStatus:
 
     def progress(self):
         try:
-            progress_raw = self._obj.processed_bytes / self._size * 100
+            progress_raw = self._obj._processed_bytes / self._size * 100
         except:
             progress_raw = 0
         return f"{round(progress_raw, 2)}%"
@@ -39,7 +39,7 @@ class TelegramStatus:
 
     def eta(self):
         try:
-            seconds = (self._size - self._obj.processed_bytes) / self._obj.speed
+            seconds = (self._size - self._obj._processed_bytes) / self._obj.speed
             return get_readable_time(seconds)
         except:
             return "-"
