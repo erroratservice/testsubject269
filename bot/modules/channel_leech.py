@@ -26,24 +26,27 @@ def generate_universal_telegram_gid(chat_id: int, message_id: int) -> str:
 
 def extract_telegram_url_components(telegram_url: str) -> tuple:
     """Extract components from Telegram URL for GID generation"""
+    # Pattern for different Telegram URL formats
     patterns = [
         r't\.me/c/(\d+)/(\d+)',           # Private: t.me/c/123456789/456
         r't\.me/([^/\s]+)/(\d+)',         # Public: t.me/channel_name/456
     ]
-
+    
     for pattern in patterns:
         match = re.search(pattern, telegram_url)
         if match:
             chat_identifier = match.group(1)
             message_id = int(match.group(2))
-
+            
             if chat_identifier.isdigit():
+                # Private channel format: convert to full chat_id
                 chat_id = -int(f"100{chat_identifier}")
             else:
+                # Public channel: will be resolved at runtime
                 return chat_identifier, message_id, 'username'
-
+            
             return chat_id, message_id, 'chat_id'
-
+    
     return None, None, None
 
 def remove_emoji(text):
@@ -64,18 +67,38 @@ def remove_emoji(text):
 
 def sanitize_filename(filename):
     """Sanitize filename by creating clean dot-separated names"""
+    # Remove emojis first
     filename = remove_emoji(filename)
+    
+    # Replace underscores with spaces
     filename = re.sub(r'[_]+', ' ', filename)
+    
+    # Replace unwanted characters with spaces (not dots)
     filename = re.sub(r'[^\w\d\.\s-]', ' ', filename)
+    
+    # Remove spaces around existing dots
     filename = re.sub(r'\s*\.\s*', '.', filename)
+    
+    # Replace multiple dots with single dot
     filename = re.sub(r'\.{2,}', '.', filename)
+    
+    # Replace multiple spaces with single space
     filename = re.sub(r'\s+', ' ', filename)
+    
+    # Trim leading/trailing dots and spaces
     filename = filename.strip(' .')
+    
+    # Finally replace remaining spaces with dots
     filename = filename.replace(' ', '.')
+    
+    # Ensure we don't end up with empty filename
     if not filename:
         filename = "file"
+    
+    # Limit length
     if len(filename) > 200:
         filename = filename[:200]
+    
     return filename
 
 class UniversalChannelLeechCoordinator(TaskListener):
@@ -85,17 +108,22 @@ class UniversalChannelLeechCoordinator(TaskListener):
         self.client = client
         self.message = message
         self.channel_id = None
-        self.channel_chat_id = None
+        self.channel_chat_id = None  # Resolved numeric chat_id
         self.filter_tags = []
         self.status_message = None
         self.operation_key = None
         self.use_caption_as_filename = True
-        self.max_concurrent = 2
-        self.check_interval = 10 # Increased interval for stability
-        self.pending_files = []
-        self.our_active_gids = set()
+        
+        # Smart queue configuration
+        self.max_concurrent = 2           # Max active downloads
+        self.check_interval = 10           # Check every 10 seconds
+        
+        # Track our downloads using perfect GID prediction
+        self.pending_files = []           # Files waiting to start
+        self.our_active_gids = set()      # Predicted GIDs we're tracking
         self.completed_count = 0
         self.total_files = 0
+        
         super().__init__()
 
     async def new_event(self):
@@ -208,7 +236,8 @@ class UniversalChannelLeechCoordinator(TaskListener):
         
         try:
             clean_name = self._generate_clean_filename(file_item['file_info'], file_item['message_id'])
-            leech_cmd = f"/leech {file_item['url']} -n \{clean_name}\"
+            # Corrected line to remove extra quotes
+            leech_cmd = f"/leech {file_item['url']} -n {clean_name}"
             
             self.our_active_gids.add(gid)
             LOGGER.info(f"[cleech] Queued GID: {gid} | Name: {clean_name}")
@@ -270,7 +299,7 @@ class UniversalChannelLeechCoordinator(TaskListener):
             clean_base += original_ext
         
         name, ext = os.path.splitext(clean_base)
-        return f"{name}.{message_id}{ext}"
+        return f'"{name}.{message_id}{ext}"' # Add quotes here
 
     def _parse_arguments(self, args):
         parsed, i = {}, 0
@@ -286,21 +315,82 @@ class UniversalChannelLeechCoordinator(TaskListener):
     def cancel_task(self):
         self.is_cancelled = True
 
-# Kept for compatibility if you use /scan
 class ChannelScanListener(TaskListener):
+    """Simple channel scanner for database building"""
+    
     def __init__(self, client, message):
+        self.client = client
+        self.message = message
+        self.channel_id = None
+        self.filter_tags = []
+        self.scanner = None
         super().__init__()
-        # Simplified for brevity
+
     async def new_event(self):
-        await send_message(self.message, "/scan is handled by cleech now.")
+        """Handle scan command with task ID assignment"""
+        text = self.message.text.split()
+        
+        if len(text) < 2:
+            usage_text = (
+                "**Usage:** `/scan <channel_id> [filter]`\n\n"
+                "**Examples:**\n"
+                "`/scan @my_channel`\n"
+                "`/scan -1001234567890`\n"
+                "`/scan @movies_channel movie`\n\n"
+                "**Purpose:** Build file database for duplicate detection"
+            )
+            await send_message(self.message, usage_text)
+            return
+
+        self.channel_id = text[1]
+        self.filter_tags = text[2:] if len(text) > 2 else []
+
+        if not user:
+            await send_message(self.message, "User session is required for channel scanning!")
+            return
+
+        filter_text = f" with filter: `{' '.join(self.filter_tags)}`" if self.filter_tags else ""
+        status_msg = await send_message(
+            self.message, 
+            f"🔍 Starting scan `{str(self.mid)[:12]}`\n"
+            f"**Channel:** `{self.channel_id}`{filter_text}\n"
+            f"**Cancel with:** `/cancel {str(self.mid)[:12]}`"
+        )
+
+        try:
+            self.scanner = ChannelScanner(user, self.channel_id, filter_tags=self.filter_tags)
+            self.scanner.listener = self
+            await self.scanner.scan(status_msg)
+            
+        except Exception as e:
+            LOGGER.error(f"[CHANNEL-SCANNER] Error: {e}")
+            await edit_message(status_msg, f"❌ Scan failed: {str(e)}")
+
     def cancel_task(self):
-        pass
+        """Cancel the scan operation"""
+        self.is_cancelled = True
+        if self.scanner:
+            self.scanner.running = False
+        LOGGER.info(f"[CHANNEL-SCANNER] Scan cancelled for {self.channel_id}")
+
+@new_task
+async def channel_scan(client, message):
+    """Handle /scan command with task ID support"""
+    await ChannelScanListener(user, message).new_event()
 
 @new_task
 async def universal_channel_leech_cmd(client, message):
+    """Handle /cleech with universal GID tracking"""
     await UniversalChannelLeechCoordinator(client, message).new_event()
 
+# Register BOTH handlers
 bot.add_handler(MessageHandler(
-    universal_channel_leech_cmd,
+    channel_scan,
+    filters=command("scan") & CustomFilters.authorized
+))
+
+bot.add_handler(MessageHandler(
+    universal_channel_leech_cmd, 
     filters=command("cleech") & CustomFilters.authorized
 ))
+        
