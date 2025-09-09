@@ -208,7 +208,7 @@ class UniversalChannelLeechCoordinator(TaskListener):
             self.pending_files.insert(0, file_item)
 
     async def _check_completed_via_database(self):
-        """Check completion by directly querying the tasks collection without dropping it"""
+        """Check completion by directly querying the tasks collection with detailed debugging"""
         completed_links = []
         try:
             # Return early if database is not available
@@ -220,26 +220,41 @@ class UniversalChannelLeechCoordinator(TaskListener):
             
             # Directly query the tasks collection without dropping it
             current_incomplete_links = set()
+            actual_db_links = []  # For debugging
+            
             if await database._db.tasks[BOT_ID].find_one():
                 rows = database._db.tasks[BOT_ID].find({})
                 async for row in rows:
-                    current_incomplete_links.add(row["_id"])
+                    link = row["_id"]
+                    current_incomplete_links.add(link)
+                    actual_db_links.append(link)
             
-            LOGGER.info(f"[cleech-debug] Current incomplete links in DB: {len(current_incomplete_links)} links")
-            LOGGER.info(f"[cleech-debug] Our tracked links: {len(self.our_active_links)} links")
+            # Detailed debug logging
+            LOGGER.info(f"[cleech-debug] DB contains these exact links: {actual_db_links}")
+            LOGGER.info(f"[cleech-debug] We're tracking these links: {list(self.our_active_links)}")
             
-            # Check which of our tracked links are no longer in incomplete tasks
-            for link in list(self.our_active_links):
-                if link not in current_incomplete_links:
-                    self.our_active_links.remove(link)
-                    completed_links.append(link)
-                    self.completed_count += 1
-                    LOGGER.info(f"[cleech] Completed link: {link}")
+            # Check for exact matches
+            for tracked_link in list(self.our_active_links):
+                LOGGER.info(f"[cleech-debug] Checking if '{tracked_link}' is in DB...")
+                if tracked_link in current_incomplete_links:
+                    LOGGER.info(f"[cleech-debug] ✓ Found match for: {tracked_link}")
                 else:
-                    LOGGER.info(f"[cleech-debug] Link still active: {link}")
+                    LOGGER.info(f"[cleech-debug] ✗ No match for: {tracked_link}")
+                    # Check for partial matches to debug URL differences
+                    for db_link in actual_db_links:
+                        if tracked_link in db_link or db_link in tracked_link:
+                            LOGGER.info(f"[cleech-debug] Partial match found - DB: '{db_link}' vs Tracked: '{tracked_link}'")
                     
+                    # Mark as completed since it's not in DB
+                    self.our_active_links.remove(tracked_link)
+                    completed_links.append(tracked_link)
+                    self.completed_count += 1
+                    LOGGER.info(f"[cleech] Completed link: {tracked_link}")
+                        
         except Exception as e:
             LOGGER.error(f"[cleech] Error checking completion: {e}")
+            import traceback
+            LOGGER.error(f"[cleech] Traceback: {traceback.format_exc()}")
             
         return completed_links
 
