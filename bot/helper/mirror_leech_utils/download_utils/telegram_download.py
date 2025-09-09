@@ -68,7 +68,7 @@ class TelegramDownloadHelper:
             GLOBAL_GID.remove(self._id)
 
     async def _download(self, message, path):
-        max_retries = 2  # Allow 2 retries for transient failures
+        max_retries = 2
         retry_count = 0
         
         while retry_count <= max_retries:
@@ -83,13 +83,11 @@ class TelegramDownloadHelper:
                     await self._on_download_error("Cancelled by user!")
                     return
                 
-                # Check if download was successful
                 if download is not None:
                     LOGGER.info(f"Download completed successfully: {self._listener.name}")
                     await self._on_download_complete()
                     return
                 else:
-                    # Download returned None - treat as failure
                     error_msg = f"Download failed (None returned) - attempt {retry_count + 1}/{max_retries + 1}"
                     LOGGER.error(error_msg)
                     
@@ -98,13 +96,12 @@ class TelegramDownloadHelper:
                         return
                     else:
                         retry_count += 1
-                        await sleep(5)  # Wait 5 seconds before retry
+                        await sleep(5)
                         continue
                 
             except FloodWait as f:
                 LOGGER.warning(f"FloodWait encountered: sleeping for {f.value} seconds")
                 await sleep(f.value)
-                # Don't count FloodWait as a retry attempt
                 continue
                 
             except TimeoutError as e:
@@ -117,11 +114,10 @@ class TelegramDownloadHelper:
                     return
                 else:
                     retry_count += 1
-                    await sleep(10)  # Wait longer for timeout errors
+                    await sleep(10)
                     continue
                     
             except OSError as e:
-                # Handle network-related errors
                 error_msg = f"Network error during download - attempt {retry_count + 1}/{max_retries + 1}: {str(e)}"
                 LOGGER.error(error_msg)
                 
@@ -131,10 +127,9 @@ class TelegramDownloadHelper:
                         return
                     else:
                         retry_count += 1
-                        await sleep(15)  # Wait longer for network errors
+                        await sleep(15)
                         continue
                 else:
-                    # Non-retryable OS error
                     await self._on_download_error(f"System error: {str(e)}")
                     return
                     
@@ -142,7 +137,6 @@ class TelegramDownloadHelper:
                 error_msg = f"Unexpected error during download - attempt {retry_count + 1}/{max_retries + 1}: {str(e)}"
                 LOGGER.error(error_msg)
                 
-                # For unknown errors, try once more, then fail
                 if retry_count >= max_retries:
                     await self._on_download_error(f"Download failed after {max_retries + 1} attempts: {str(e)}")
                     return
@@ -189,7 +183,7 @@ class TelegramDownloadHelper:
                     path = path + self._listener.name
                 self._listener.size = media.file_size
                 
-                # NEW: Set expected size for TaskListener validation
+                # Set TaskListener attributes for failure tracking
                 self._listener.expected_size = media.file_size
                 self._listener.file_unique_id = media.file_unique_id
                 
