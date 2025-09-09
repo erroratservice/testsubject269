@@ -48,7 +48,6 @@ from ..telegram_helper.message_utils import (
 class TaskListener(TaskConfig):
     def __init__(self):
         super().__init__()
-        # NEW: Simple failure tracking for channel leech
         self.download_failed = False
         self.upload_failed = False
 
@@ -110,7 +109,6 @@ class TaskListener(TaskConfig):
                                 ]
                                 des_path = f"{DOWNLOAD_DIR}{des_id}{self.folder_name}"
                                 await makedirs(des_path, exist_ok=True)
-                                LOGGER.info(f"Moving files from {self.mid} to {des_id}")
                                 for item in await listdir(spath):
                                     if item.endswith((".aria2", ".!qB")):
                                         continue
@@ -128,7 +126,6 @@ class TaskListener(TaskConfig):
             download = task_dict[self.mid]
             self.name = download.name()
             gid = download.gid()
-        LOGGER.info(f"Download completed: {self.name}")
         if not (self.is_torrent or self.is_qbit):
             self.seed = False
         unwanted_files = []
@@ -220,19 +217,16 @@ class TaskListener(TaskConfig):
         add_to_queue, event = await check_running_tasks(self, "up")
         await start_from_queued()
         if add_to_queue:
-            LOGGER.info(f"Added to Queue/Upload: {self.name}")
             async with task_dict_lock:
                 task_dict[self.mid] = QueueStatus(self, gid, "Up")
             await event.wait()
             if self.is_cancelled:
                 return
-            LOGGER.info(f"Start from Queued/Upload: {self.name}")
         self.size = await get_path_size(up_dir)
         for s in unwanted_files_size:
             self.size -= s
 
         if self.is_leech:
-            LOGGER.info(f"Leech Name: {self.name}")
             tg = TelegramUploader(self, up_dir)
             async with task_dict_lock:
                 task_dict[self.mid] = TelegramStatus(self, tg, gid, "up")
@@ -241,7 +235,6 @@ class TaskListener(TaskConfig):
                 tg.upload(unwanted_files, files_to_delete),
             )
         elif is_gdrive_id(self.up_dest):
-            LOGGER.info(f"Gdrive Upload Name: {self.name}")
             drive = GoogleDriveUpload(self, up_path)
             async with task_dict_lock:
                 task_dict[self.mid] = GoogleDriveStatus(self, drive, gid, "up")
@@ -250,7 +243,6 @@ class TaskListener(TaskConfig):
                 sync_to_async(drive.upload, unwanted_files, files_to_delete),
             )
         else:
-            LOGGER.info(f"Rclone Upload Name: {self.name}")
             RCTransfer = RcloneTransferHelper(self)
             async with task_dict_lock:
                 task_dict[self.mid] = RcloneStatus(self, RCTransfer, gid, "up")
@@ -270,7 +262,6 @@ class TaskListener(TaskConfig):
             await database.rm_complete_task(self.message.link)
 
         msg = f"<b>Name: </b><code>{escape(self.name)}</code>\n\n<b>Size: </b>{get_readable_file_size(self.size)}"
-        LOGGER.info(f"Task Done: {self.name}")
         if self.is_leech:
             msg += f"\n<b>Total Files: </b>{folders}"
             if mime_type != 0:
@@ -371,10 +362,8 @@ class TaskListener(TaskConfig):
         ):
             await database.rm_complete_task(self.message.link)
 
-        # NEW: Mark as failed for channel leech files
         if hasattr(self, 'is_channel_leech') and self.is_channel_leech:
             self.download_failed = True
-            LOGGER.warning(f"Channel leech download failed: {self.name} - {str(error)}")
 
         async with queue_dict_lock:
             if self.mid in queued_dl:
@@ -412,10 +401,8 @@ class TaskListener(TaskConfig):
         ):
             await database.rm_complete_task(self.message.link)
 
-        # NEW: Mark as failed for channel leech files
         if hasattr(self, 'is_channel_leech') and self.is_channel_leech:
             self.upload_failed = True
-            LOGGER.warning(f"Channel leech upload failed: {self.name} - {str(error)}")
 
         async with queue_dict_lock:
             if self.mid in queued_dl:
