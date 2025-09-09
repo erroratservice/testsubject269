@@ -215,7 +215,7 @@ class UniversalChannelLeechCoordinator(TaskListener):
         try:
             COMMAND_CHANNEL_ID = -1001791052293
             clean_name = self._generate_clean_filename(file_item['file_info'], file_item['message_id'])
-            leech_cmd = f'/leech {file_item["url"]} -n "{clean_name}"'
+            leech_cmd = f'/leech {file_item["url"]} -n {clean_name}'
             
             # Track by link (what database actually uses)
             self.our_active_links.add(link)
