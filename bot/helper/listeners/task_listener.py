@@ -3,7 +3,6 @@ from aioshutil import move
 from asyncio import sleep, gather
 from html import escape
 from requests import utils as rutils
-
 from bot import (
     intervals,
     aria2,
@@ -45,7 +44,6 @@ from ..telegram_helper.message_utils import (
     delete_status,
     update_status_message,
 )
-
 
 class TaskListener(TaskConfig):
     def __init__(self):
@@ -128,23 +126,18 @@ class TaskListener(TaskConfig):
             self.name = download.name()
             gid = download.gid()
         LOGGER.info(f"Download completed: {self.name}")
-
         if not (self.is_torrent or self.is_qbit):
             self.seed = False
-
         unwanted_files = []
         unwanted_files_size = []
         files_to_delete = []
-
         if multi_links:
             await self.on_upload_error(
                 f"{self.name} Downloaded!\n\nWaiting for other tasks to finish..."
             )
             return
-
         if self.folder_name:
             self.name = self.folder_name.split("/")[-1]
-
         if not await aiopath.exists(f"{self.dir}/{self.name}"):
             try:
                 files = await listdir(self.dir)
@@ -154,7 +147,6 @@ class TaskListener(TaskConfig):
             except Exception as e:
                 await self.on_upload_error(str(e))
                 return
-
         up_path = f"{self.dir}/{self.name}"
         self.size = await get_path_size(up_path)
         if not config_dict["QUEUE_ALL"]:
@@ -162,17 +154,14 @@ class TaskListener(TaskConfig):
                 if self.mid in non_queued_dl:
                     non_queued_dl.remove(self.mid)
             await start_from_queued()
-
         if self.join and await aiopath.isdir(up_path):
             await join_files(up_path)
-
         if self.extract:
             up_path = await self.proceed_extract(up_path, gid)
             if self.is_cancelled:
                 return
             up_dir, self.name = up_path.rsplit("/", 1)
             self.size = await get_path_size(up_dir)
-
         if self.ffmpeg_cmds:
             up_path = await self.proceed_ffmpeg(
                 up_path,
@@ -182,20 +171,17 @@ class TaskListener(TaskConfig):
                 return
             up_dir, self.name = up_path.rsplit("/", 1)
             self.size = await get_path_size(up_dir)
-
         if self.name_sub:
             up_path = await self.substitute(up_path)
             if self.is_cancelled:
                 return
             self.name = up_path.rsplit("/", 1)[1]
-
         if self.screen_shots:
             up_path = await self.generate_screenshots(up_path)
             if self.is_cancelled:
                 return
             up_dir, self.name = up_path.rsplit("/", 1)
             self.size = await get_path_size(up_dir)
-
         if self.convert_audio or self.convert_video:
             up_path = await self.convert_media(
                 up_path,
@@ -208,7 +194,6 @@ class TaskListener(TaskConfig):
                 return
             up_dir, self.name = up_path.rsplit("/", 1)
             self.size = await get_path_size(up_dir)
-
         if self.sample_video:
             up_path = await self.generate_sample_video(
                 up_path, gid, unwanted_files, files_to_delete
@@ -217,22 +202,18 @@ class TaskListener(TaskConfig):
                 return
             up_dir, self.name = up_path.rsplit("/", 1)
             self.size = await get_path_size(up_dir)
-
         if self.compress:
             up_path = await self.proceed_compress(
                 up_path, gid, unwanted_files, files_to_delete
             )
             if self.is_cancelled:
                 return
-
         up_dir, self.name = up_path.rsplit("/", 1)
         self.size = await get_path_size(up_dir)
-
         if self.is_leech and not self.compress:
             await self.proceed_split(up_dir, unwanted_files_size, unwanted_files, gid)
             if self.is_cancelled:
                 return
-
         add_to_queue, event = await check_running_tasks(self, "up")
         await start_from_queued()
         if add_to_queue:
@@ -243,10 +224,36 @@ class TaskListener(TaskConfig):
             if self.is_cancelled:
                 return
             LOGGER.info(f"Start from Queued/Upload: {self.name}")
-
         self.size = await get_path_size(up_dir)
         for s in unwanted_files_size:
             self.size -= s
+
+        # NEW: Validate download size before telegram upload (only for channel leech files)
+        if self.is_leech and hasattr(self, 'expected_size') and hasattr(self, 'file_info'):
+            expected_size = getattr(self, 'expected_size', 0)
+            if expected_size > 102400:  # Only validate files > 100KB
+                size_ratio = self.size / expected_size if expected_size > 0 else 1
+                if size_ratio < 0.90:  # Less than 90% of expected size
+                    LOGGER.warning(f"Incomplete download detected: {self.name} - {self.size}/{expected_size} bytes ({size_ratio:.1%})")
+                    
+                    # Mark as failed in database
+                    try:
+                        if hasattr(self, 'channel_id') and hasattr(self, 'message_id'):
+                            enhanced_file_info = self.file_info.copy()
+                            enhanced_file_info['actual_size'] = self.size
+                            await database.add_failed_file_entry(
+                                self.channel_id,
+                                self.message_id,
+                                enhanced_file_info,
+                                f"incomplete_download_size_{size_ratio:.1%}"
+                            )
+                            LOGGER.info(f"Added incomplete download to failed files: {self.name}")
+                    except Exception as e:
+                        LOGGER.error(f"Error adding incomplete download to failed files: {e}")
+                    
+                    # Fail the upload
+                    await self.on_upload_error(f"Download incomplete: {self.size} bytes of expected {expected_size} bytes ({size_ratio:.1%})")
+                    return
 
         if self.is_leech:
             LOGGER.info(f"Leech Name: {self.name}")
@@ -285,6 +292,17 @@ class TaskListener(TaskConfig):
             and DATABASE_URL
         ):
             await database.rm_complete_task(self.message.link)
+
+        # NEW: Remove from failed files on successful upload (only for channel leech files)
+        if self.is_leech and hasattr(self, 'file_unique_id') and hasattr(self, 'file_info'):
+            try:
+                file_unique_id = getattr(self, 'file_unique_id', None)
+                if file_unique_id:
+                    await database.remove_failed_file_entry(file_unique_id)
+                    LOGGER.info(f"Removed from failed files after successful upload: {self.name}")
+            except Exception as e:
+                LOGGER.error(f"Error removing from failed files: {e}")
+
         msg = f"<b>Name: </b><code>{escape(self.name)}</code>\n\n<b>Size: </b>{get_readable_file_size(self.size)}"
         LOGGER.info(f"Task Done: {self.name}")
         if self.is_leech:
@@ -363,11 +381,9 @@ class TaskListener(TaskConfig):
             await self.clean()
         else:
             await update_status_message(self.message.chat.id)
-
         async with queue_dict_lock:
             if self.mid in non_queued_up:
                 non_queued_up.remove(self.mid)
-
         await start_from_queued()
 
     async def on_download_error(self, error, button=None):
@@ -382,13 +398,25 @@ class TaskListener(TaskConfig):
             await self.clean()
         else:
             await update_status_message(self.message.chat.id)
-
         if (
             self.is_super_chat
             and config_dict["INCOMPLETE_TASK_NOTIFIER"]
             and DATABASE_URL
         ):
             await database.rm_complete_task(self.message.link)
+
+        # NEW: Add to failed files on download error (only for channel leech files)
+        if hasattr(self, 'channel_id') and hasattr(self, 'message_id') and hasattr(self, 'file_info'):
+            try:
+                await database.add_failed_file_entry(
+                    self.channel_id,
+                    self.message_id,
+                    self.file_info,
+                    f"download_error: {str(error)[:100]}"
+                )
+                LOGGER.info(f"Added download error to failed files: {self.name}")
+            except Exception as e:
+                LOGGER.error(f"Error adding download error to failed files: {e}")
 
         async with queue_dict_lock:
             if self.mid in queued_dl:
@@ -401,7 +429,6 @@ class TaskListener(TaskConfig):
                 non_queued_dl.remove(self.mid)
             if self.mid in non_queued_up:
                 non_queued_up.remove(self.mid)
-
         await start_from_queued()
         await sleep(3)
         await clean_download(self.dir)
@@ -420,13 +447,29 @@ class TaskListener(TaskConfig):
             await self.clean()
         else:
             await update_status_message(self.message.chat.id)
-
         if (
             self.is_super_chat
             and config_dict["INCOMPLETE_TASK_NOTIFIER"]
             and DATABASE_URL
         ):
             await database.rm_complete_task(self.message.link)
+
+        # NEW: Add to failed files on upload error (only for channel leech files)
+        if hasattr(self, 'channel_id') and hasattr(self, 'message_id') and hasattr(self, 'file_info'):
+            try:
+                enhanced_file_info = self.file_info.copy()
+                if hasattr(self, 'size'):
+                    enhanced_file_info['actual_size'] = self.size
+                
+                await database.add_failed_file_entry(
+                    self.channel_id,
+                    self.message_id,
+                    enhanced_file_info,
+                    f"upload_error: {str(error)[:100]}"
+                )
+                LOGGER.info(f"Added upload error to failed files: {self.name}")
+            except Exception as e:
+                LOGGER.error(f"Error adding upload error to failed files: {e}")
 
         async with queue_dict_lock:
             if self.mid in queued_dl:
@@ -439,7 +482,6 @@ class TaskListener(TaskConfig):
                 non_queued_dl.remove(self.mid)
             if self.mid in non_queued_up:
                 non_queued_up.remove(self.mid)
-
         await start_from_queued()
         await sleep(3)
         await clean_download(self.dir)
