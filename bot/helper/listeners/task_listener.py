@@ -228,33 +228,6 @@ class TaskListener(TaskConfig):
         for s in unwanted_files_size:
             self.size -= s
 
-        # NEW: Validate download size before telegram upload (only for channel leech files)
-        if self.is_leech and hasattr(self, 'expected_size') and hasattr(self, 'file_info'):
-            expected_size = getattr(self, 'expected_size', 0)
-            if expected_size > 102400:  # Only validate files > 100KB
-                size_ratio = self.size / expected_size if expected_size > 0 else 1
-                if size_ratio < 0.90:  # Less than 90% of expected size
-                    LOGGER.warning(f"Incomplete download detected: {self.name} - {self.size}/{expected_size} bytes ({size_ratio:.1%})")
-                    
-                    # Mark as failed in database
-                    try:
-                        if hasattr(self, 'channel_id') and hasattr(self, 'message_id'):
-                            enhanced_file_info = self.file_info.copy()
-                            enhanced_file_info['actual_size'] = self.size
-                            await database.add_failed_file_entry(
-                                self.channel_id,
-                                self.message_id,
-                                enhanced_file_info,
-                                f"incomplete_download_size_{size_ratio:.1%}"
-                            )
-                            LOGGER.info(f"Added incomplete download to failed files: {self.name}")
-                    except Exception as e:
-                        LOGGER.error(f"Error adding incomplete download to failed files: {e}")
-                    
-                    # Fail the upload
-                    await self.on_upload_error(f"Download incomplete: {self.size} bytes of expected {expected_size} bytes ({size_ratio:.1%})")
-                    return
-
         if self.is_leech:
             LOGGER.info(f"Leech Name: {self.name}")
             tg = TelegramUploader(self, up_dir)
@@ -293,15 +266,8 @@ class TaskListener(TaskConfig):
         ):
             await database.rm_complete_task(self.message.link)
 
-        # NEW: Remove from failed files on successful upload (only for channel leech files)
-        if self.is_leech and hasattr(self, 'file_unique_id') and hasattr(self, 'file_info'):
-            try:
-                file_unique_id = getattr(self, 'file_unique_id', None)
-                if file_unique_id:
-                    await database.remove_failed_file_entry(file_unique_id)
-                    LOGGER.info(f"Removed from failed files after successful upload: {self.name}")
-            except Exception as e:
-                LOGGER.error(f"Error removing from failed files: {e}")
+        # Handle successful completion - centralized failure tracking
+        await self._handle_completion_success()
 
         msg = f"<b>Name: </b><code>{escape(self.name)}</code>\n\n<b>Size: </b>{get_readable_file_size(self.size)}"
         LOGGER.info(f"Task Done: {self.name}")
@@ -405,18 +371,8 @@ class TaskListener(TaskConfig):
         ):
             await database.rm_complete_task(self.message.link)
 
-        # NEW: Add to failed files on download error (only for channel leech files)
-        if hasattr(self, 'channel_id') and hasattr(self, 'message_id') and hasattr(self, 'file_info'):
-            try:
-                await database.add_failed_file_entry(
-                    self.channel_id,
-                    self.message_id,
-                    self.file_info,
-                    f"download_error: {str(error)[:100]}"
-                )
-                LOGGER.info(f"Added download error to failed files: {self.name}")
-            except Exception as e:
-                LOGGER.error(f"Error adding download error to failed files: {e}")
+        # Handle download failure - centralized failure tracking
+        await self._handle_completion_failure(f"download_error: {str(error)}")
 
         async with queue_dict_lock:
             if self.mid in queued_dl:
@@ -454,22 +410,8 @@ class TaskListener(TaskConfig):
         ):
             await database.rm_complete_task(self.message.link)
 
-        # NEW: Add to failed files on upload error (only for channel leech files)
-        if hasattr(self, 'channel_id') and hasattr(self, 'message_id') and hasattr(self, 'file_info'):
-            try:
-                enhanced_file_info = self.file_info.copy()
-                if hasattr(self, 'size'):
-                    enhanced_file_info['actual_size'] = self.size
-                
-                await database.add_failed_file_entry(
-                    self.channel_id,
-                    self.message_id,
-                    enhanced_file_info,
-                    f"upload_error: {str(error)[:100]}"
-                )
-                LOGGER.info(f"Added upload error to failed files: {self.name}")
-            except Exception as e:
-                LOGGER.error(f"Error adding upload error to failed files: {e}")
+        # Handle upload failure - centralized failure tracking
+        await self._handle_completion_failure(f"upload_error: {str(error)}")
 
         async with queue_dict_lock:
             if self.mid in queued_dl:
@@ -489,3 +431,37 @@ class TaskListener(TaskConfig):
             await clean_download(self.new_dir)
         if self.thumb and await aiopath.exists(self.thumb):
             await remove(self.thumb)
+
+    # NEW: Centralized completion handling methods
+    async def _handle_completion_success(self):
+        """Handle successful completion - remove from failed files"""
+        if (hasattr(self, 'file_unique_id') and 
+            hasattr(self, 'channel_id') and 
+            self.file_unique_id):
+            try:
+                await database.remove_failed_file_entry(self.file_unique_id)
+                LOGGER.info(f"Removed from failed files after success: {self.name}")
+            except Exception as e:
+                LOGGER.error(f"Error removing from failed files: {e}")
+
+    async def _handle_completion_failure(self, failure_reason):
+        """Handle completion failure - add to failed files"""
+        if (hasattr(self, 'channel_id') and 
+            hasattr(self, 'message_id') and 
+            hasattr(self, 'file_info') and
+            hasattr(self, 'expected_size') and
+            self.expected_size > 0):
+            try:
+                enhanced_file_info = self.file_info.copy()
+                if hasattr(self, 'size'):
+                    enhanced_file_info['actual_size'] = self.size
+                
+                await database.add_failed_file_entry(
+                    self.channel_id,
+                    self.message_id,
+                    enhanced_file_info,
+                    failure_reason[:100]
+                )
+                LOGGER.info(f"Added to failed files: {self.name} - {failure_reason}")
+            except Exception as e:
+                LOGGER.error(f"Error adding to failed files: {e}")
