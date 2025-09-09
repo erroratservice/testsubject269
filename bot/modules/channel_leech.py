@@ -268,9 +268,14 @@ class UniversalChannelLeechCoordinator(TaskListener):
                 f"**Active:** {len(self.our_active_links)}/{self.max_concurrent} | **Pending:** {len(self.pending_files)}\n\n"
                 f"**Cancel:** `/cancel {str(self.mid)[:12]}`"
             )
-            await edit_message(self.status_message, text)
+            
+            # Only update if content has changed
+            if not hasattr(self, '_last_status_text') or self._last_status_text != text:
+                await edit_message(self.status_message, text)
+                self._last_status_text = text  # Store for comparison
+                
         except Exception as e:
-            # Ignore MESSAGE_NOT_MODIFIED errors - they're harmless
+            # Still ignore MESSAGE_NOT_MODIFIED errors as backup
             if "MESSAGE_NOT_MODIFIED" not in str(e):
                 LOGGER.error(f"[cleech] Progress update error: {e}")
 
