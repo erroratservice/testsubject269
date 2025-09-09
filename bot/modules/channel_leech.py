@@ -186,8 +186,10 @@ class UniversalChannelLeechCoordinator(TaskListener):
         await self._show_final_results()
 
     async def _start_next_download(self):
-        """Start next download and track by link"""
-        if not self.pending_files: return
+        """Start next download and capture the actual command message ID for tracking"""
+        if not self.pending_files: 
+            return
+            
         file_item = self.pending_files.pop(0)
         link = file_item['link']
         
@@ -196,31 +198,35 @@ class UniversalChannelLeechCoordinator(TaskListener):
             clean_name = self._generate_clean_filename(file_item['file_info'], file_item['message_id'])
             leech_cmd = f'/leech {file_item["url"]} -n {clean_name}'
             
-            await user.send_message(chat_id=COMMAND_CHANNEL_ID, text=leech_cmd)
-            await asyncio.sleep(3) # Give bot time to process the command
+            # Send the command and capture the command message
+            command_message = await user.send_message(chat_id=COMMAND_CHANNEL_ID, text=leech_cmd)
+            command_msg_id = command_message.id
             
-            # Add to our tracking after command is sent
-            self.our_active_links.add(link)
-            LOGGER.info(f"[cleech] Queued link: {link} in command channel.")
+            # The database will store a URL with the COMMAND message ID, not the original file ID
+            # Construct what will actually be stored in database
+            actual_stored_url = f"https://t.me/c/{str(COMMAND_CHANNEL_ID)[4:]}/{command_msg_id}"
+            
+            await asyncio.sleep(5)  # Give bot time to process
+            
+            # Track by the URL that will actually be in the database
+            self.our_active_links.add(actual_stored_url)
+            LOGGER.info(f"[cleech] Tracking command URL: {actual_stored_url} (original: {link})")
             
         except Exception as e:
             LOGGER.error(f"[cleech] Error starting link {link}: {e}")
             self.pending_files.insert(0, file_item)
 
     async def _check_completed_via_database(self):
-        """Check completion by directly querying the tasks collection with detailed debugging"""
+        """Check completion using the actual stored URLs"""
         completed_links = []
         try:
-            # Return early if database is not available
             if database._return:
                 return completed_links
             
-            # Get BOT_ID from database instance
             from bot import BOT_ID
             
-            # Directly query the tasks collection without dropping it
             current_incomplete_links = set()
-            actual_db_links = []  # For debugging
+            actual_db_links = []
             
             if await database._db.tasks[BOT_ID].find_one():
                 rows = database._db.tasks[BOT_ID].find({})
@@ -229,34 +235,24 @@ class UniversalChannelLeechCoordinator(TaskListener):
                     current_incomplete_links.add(link)
                     actual_db_links.append(link)
             
-            # Detailed debug logging
-            LOGGER.info(f"[cleech-debug] DB contains these exact links: {actual_db_links}")
-            LOGGER.info(f"[cleech-debug] We're tracking these links: {list(self.our_active_links)}")
+            LOGGER.info(f"[cleech-debug] DB contains: {actual_db_links}")
+            LOGGER.info(f"[cleech-debug] We're tracking: {list(self.our_active_links)}")
             
-            # Check for exact matches
+            # Now the URLs should match exactly
             for tracked_link in list(self.our_active_links):
-                LOGGER.info(f"[cleech-debug] Checking if '{tracked_link}' is in DB...")
-                if tracked_link in current_incomplete_links:
-                    LOGGER.info(f"[cleech-debug] ✓ Found match for: {tracked_link}")
-                else:
-                    LOGGER.info(f"[cleech-debug] ✗ No match for: {tracked_link}")
-                    # Check for partial matches to debug URL differences
-                    for db_link in actual_db_links:
-                        if tracked_link in db_link or db_link in tracked_link:
-                            LOGGER.info(f"[cleech-debug] Partial match found - DB: '{db_link}' vs Tracked: '{tracked_link}'")
-                    
-                    # Mark as completed since it's not in DB
+                if tracked_link not in current_incomplete_links:
                     self.our_active_links.remove(tracked_link)
                     completed_links.append(tracked_link)
                     self.completed_count += 1
-                    LOGGER.info(f"[cleech] Completed link: {tracked_link}")
-                        
+                    LOGGER.info(f"[cleech] Completed: {tracked_link}")
+                else:
+                    LOGGER.info(f"[cleech-debug] Still active: {tracked_link}")
+                    
         except Exception as e:
             LOGGER.error(f"[cleech] Error checking completion: {e}")
-            import traceback
-            LOGGER.error(f"[cleech] Traceback: {traceback.format_exc()}")
             
         return completed_links
+
 
     async def _update_progress(self):
         if not self.status_message: return
