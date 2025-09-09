@@ -3,7 +3,7 @@ from pyrogram.handlers import MessageHandler
 from pyrogram.errors import FloodWait
 from bot import bot, user, LOGGER
 from ..helper.ext_utils.bot_utils import new_task
-from ..helper.ext_utils.db_handler import database  # Keep original import pattern
+from ..helper.ext_utils.db_handler import database
 from ..helper.telegram_helper.message_utils import send_message, edit_message
 from ..helper.telegram_helper.filters import CustomFilters
 from ..helper.mirror_leech_utils.channel_scanner import ChannelScanner
@@ -89,7 +89,7 @@ class UniversalChannelLeechCoordinator(TaskListener):
         self.max_concurrent = 2
         self.check_interval = 10 # Increased interval for stability
         self.pending_files = []
-        self.our_active_links = set()  # Changed from our_active_gids to our_active_links
+        self.our_active_links = set()  # Track by links instead of GIDs
         self.completed_count = 0
         self.total_files = 0
         super().__init__()
@@ -169,16 +169,16 @@ class UniversalChannelLeechCoordinator(TaskListener):
             await edit_message(self.status_message, "✅ No new files to download!")
             return
         LOGGER.info(f"[cleech] Found {self.total_files} files. Starting download process.")
-        await self._process_with_link_tracking()  # Changed method name
+        await self._process_with_link_tracking()
 
-    async def _process_with_link_tracking(self):  # Changed method name
+    async def _process_with_link_tracking(self):
         """Process files using database link tracking"""
         while len(self.our_active_links) < self.max_concurrent and self.pending_files:
             await self._start_next_download()
         while (self.our_active_links or self.pending_files) and not self.is_cancelled:
             await self._update_progress()
             await asyncio.sleep(self.check_interval)
-            completed_links = await self._check_completed_via_database()  # Changed method name
+            completed_links = await self._check_completed_via_database()
             for _ in completed_links:
                 if self.pending_files and len(self.our_active_links) < self.max_concurrent:
                     await self._start_next_download()
@@ -189,33 +189,44 @@ class UniversalChannelLeechCoordinator(TaskListener):
         """Start next download and track by link"""
         if not self.pending_files: return
         file_item = self.pending_files.pop(0)
-        link = file_item['link']  # Use link instead of predicted_gid
+        link = file_item['link']
         
         try:
             COMMAND_CHANNEL_ID = -1001791052293
             clean_name = self._generate_clean_filename(file_item['file_info'], file_item['message_id'])
             leech_cmd = f'/leech {file_item["url"]} -n {clean_name}'
             
-            self.our_active_links.add(link)  # Track by link
-            LOGGER.info(f"[cleech] Queued link: {link} in command channel.")
-            
             await user.send_message(chat_id=COMMAND_CHANNEL_ID, text=leech_cmd)
             await asyncio.sleep(3) # Give bot time to process the command
+            
+            # Add to our tracking after command is sent
+            self.our_active_links.add(link)
+            LOGGER.info(f"[cleech] Queued link: {link} in command channel.")
+            
         except Exception as e:
             LOGGER.error(f"[cleech] Error starting link {link}: {e}")
-            self.our_active_links.discard(link)
             self.pending_files.insert(0, file_item)
 
-    async def _check_completed_via_database(self):  # Changed method name and logic
-        """Check completion using database incomplete tasks"""
+    async def _check_completed_via_database(self):
+        """Check completion by directly querying the tasks collection without dropping it"""
         completed_links = []
         try:
-            # Get current incomplete tasks and extract all links
-            incomplete_data = await database.get_incomplete_tasks()
+            # Return early if database is not available
+            if database._return:
+                return completed_links
+            
+            # Get BOT_ID from database instance
+            from bot import BOT_ID
+            
+            # Directly query the tasks collection without dropping it
             current_incomplete_links = set()
-            for cid_data in incomplete_data.values():
-                for tag_data in cid_data.values():
-                    current_incomplete_links.update(tag_data)
+            if await database._db.tasks[BOT_ID].find_one():
+                rows = database._db.tasks[BOT_ID].find({})
+                async for row in rows:
+                    current_incomplete_links.add(row["_id"])
+            
+            LOGGER.info(f"[cleech-debug] Current incomplete links in DB: {len(current_incomplete_links)} links")
+            LOGGER.info(f"[cleech-debug] Our tracked links: {len(self.our_active_links)} links")
             
             # Check which of our tracked links are no longer in incomplete tasks
             for link in list(self.our_active_links):
@@ -224,8 +235,12 @@ class UniversalChannelLeechCoordinator(TaskListener):
                     completed_links.append(link)
                     self.completed_count += 1
                     LOGGER.info(f"[cleech] Completed link: {link}")
+                else:
+                    LOGGER.info(f"[cleech-debug] Link still active: {link}")
+                    
         except Exception as e:
             LOGGER.error(f"[cleech] Error checking completion: {e}")
+            
         return completed_links
 
     async def _update_progress(self):
@@ -279,7 +294,6 @@ class UniversalChannelLeechCoordinator(TaskListener):
     def cancel_task(self):
         self.is_cancelled = True
 
-# Keep the rest exactly the same as your working older code
 class ChannelScanListener(TaskListener):
     """Simple channel scanner for database building"""
     
