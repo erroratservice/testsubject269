@@ -30,20 +30,16 @@ def extract_telegram_url_components(telegram_url: str) -> tuple:
         r't\.me/c/(\d+)/(\d+)',           # Private: t.me/c/123456789/456
         r't\.me/([^/\s]+)/(\d+)',         # Public: t.me/channel_name/456
     ]
-
     for pattern in patterns:
         match = re.search(pattern, telegram_url)
         if match:
             chat_identifier = match.group(1)
             message_id = int(match.group(2))
-
             if chat_identifier.isdigit():
                 chat_id = -int(f"100{chat_identifier}")
             else:
                 return chat_identifier, message_id, 'username'
-
             return chat_id, message_id, 'chat_id'
-
     return None, None, None
 
 def remove_emoji(text):
@@ -79,8 +75,8 @@ def sanitize_filename(filename):
     return filename
 
 class UniversalChannelLeechCoordinator(TaskListener):
-    """Universal coordinator with perfect GID prediction for all Telegram downloads"""
-
+    """Universal coordinator tracking downloads via database incomplete tasks"""
+    
     def __init__(self, client, message):
         self.client = client
         self.message = message
@@ -91,9 +87,9 @@ class UniversalChannelLeechCoordinator(TaskListener):
         self.operation_key = None
         self.use_caption_as_filename = True
         self.max_concurrent = 2
-        self.check_interval = 10 # Increased interval for stability
+        self.check_interval = 10
         self.pending_files = []
-        self.our_active_gids = set()
+        self.our_active_links = set()  # Track by links instead of GIDs
         self.completed_count = 0
         self.total_files = 0
         super().__init__()
@@ -102,7 +98,7 @@ class UniversalChannelLeechCoordinator(TaskListener):
         """Main event handler"""
         text = self.message.text.split()
         args = self._parse_arguments(text[1:])
-
+        
         if 'channel' not in args:
             usage_text = (
                 "**Usage:** `/cleech -ch <channel_id> [-f filter_text] [--no-caption]`\n\n"
@@ -133,7 +129,6 @@ class UniversalChannelLeechCoordinator(TaskListener):
         )
 
         filter_text = f" with filter: `{' '.join(self.filter_tags)}`" if self.filter_tags else ""
-
         self.status_message = await send_message(
             self.message,
             f"🌟 **Channel Leech Initializing...**\n"
@@ -151,14 +146,18 @@ class UniversalChannelLeechCoordinator(TaskListener):
                 await channel_status.stop_operation(self.operation_key)
 
     async def _coordinate_universal_leech(self):
-        """Main coordination with universal GID system"""
+        """Main coordination with database link tracking"""
         await edit_message(self.status_message, f"🔍 **Scanning Channel...**")
         scanner = ChannelScanner(user, self.channel_id, filter_tags=self.filter_tags)
         
         async for message in user.get_chat_history(self.channel_id):
-            if self.is_cancelled: break
+            if self.is_cancelled: 
+                break
+                
             file_info = await scanner._extract_file_info(message)
-            if not file_info: continue
+            if not file_info: 
+                continue
+                
             if self.filter_tags and not all(tag.lower() in file_info['search_text'].lower() for tag in self.filter_tags):
                 continue
             
@@ -175,7 +174,7 @@ class UniversalChannelLeechCoordinator(TaskListener):
                 'filename': file_info['file_name'],
                 'message_id': message.id,
                 'file_info': file_info,
-                'predicted_gid': file_info.get('file_unique_id')
+                'link': message_link  # Track by link instead of predicted_gid
             })
 
         self.total_files = len(self.pending_files)
@@ -184,68 +183,88 @@ class UniversalChannelLeechCoordinator(TaskListener):
             return
 
         LOGGER.info(f"[cleech] Found {self.total_files} files. Starting download process.")
-        await self._process_with_universal_gid_tracking()
+        await self._process_with_link_tracking()
 
-    async def _process_with_universal_gid_tracking(self):
-        """Process files using universal GID tracking"""
-        while len(self.our_active_gids) < self.max_concurrent and self.pending_files:
+    async def _process_with_link_tracking(self):
+        """Process files using database link tracking"""
+        # Start initial downloads
+        while len(self.our_active_links) < self.max_concurrent and self.pending_files:
             await self._start_next_download()
 
-        while (self.our_active_gids or self.pending_files) and not self.is_cancelled:
+        # Monitor progress
+        while (self.our_active_links or self.pending_files) and not self.is_cancelled:
             await self._update_progress()
             await asyncio.sleep(self.check_interval)
-            completed_gids = await self._check_completed_via_incomplete_task_notifier()
-            for _ in completed_gids:
-                if self.pending_files and len(self.our_active_gids) < self.max_concurrent:
+            
+            completed_links = await self._check_completed_via_database()
+            for _ in completed_links:
+                # Start next download when slot becomes available
+                if self.pending_files and len(self.our_active_links) < self.max_concurrent:
                     await self._start_next_download()
         
         await self._show_final_results()
 
     async def _start_next_download(self):
-        """Start next download with perfect GID prediction"""
-        if not self.pending_files: return
+        """Start next download and track by link"""
+        if not self.pending_files: 
+            return
+            
         file_item = self.pending_files.pop(0)
-        gid = file_item['predicted_gid']
+        link = file_item['link']
         
         try:
             COMMAND_CHANNEL_ID = -1001791052293
-
             clean_name = self._generate_clean_filename(file_item['file_info'], file_item['message_id'])
             leech_cmd = f'/leech {file_item["url"]} -n "{clean_name}"'
             
-            self.our_active_gids.add(gid)
-            LOGGER.info(f"[cleech] Queued GID: {gid} in command channel.")
+            # Track by link (what database actually uses)
+            self.our_active_links.add(link)
+            LOGGER.info(f"[cleech] Queued link: {link}")
             
             await user.send_message(chat_id=COMMAND_CHANNEL_ID, text=leech_cmd)
-            await asyncio.sleep(3) # Give bot time to process the command
+            await asyncio.sleep(3)  # Give bot time to process the command
+            
         except Exception as e:
-            LOGGER.error(f"[cleech] Error starting GID {gid}: {e}")
-            self.our_active_gids.discard(gid)
-            self.pending_files.insert(0, file_item)
+            LOGGER.error(f"[cleech] Error starting link {link}: {e}")
+            self.our_active_links.discard(link)
+            self.pending_files.insert(0, file_item)  # Re-add to queue
 
-    async def _check_completed_via_incomplete_task_notifier(self):
-        """Check completion using our perfectly predicted GIDs"""
-        completed_gids = []
+    async def _check_completed_via_database(self):
+        """Check completion using database incomplete tasks"""
+        completed_links = []
         try:
-            current_incomplete_gids = {gid for v in (await database().get_incomplete_tasks()).values() for vv in v.values() for gid in vv}
-            for gid in list(self.our_active_gids):
-                if gid not in current_incomplete_gids:
-                    self.our_active_gids.remove(gid)
-                    completed_gids.append(gid)
+            # Get all current incomplete task links from database
+            incomplete_tasks = await database().get_incomplete_tasks()
+            current_incomplete_links = set()
+            
+            # Extract all links from the nested structure
+            for cid_data in incomplete_tasks.values():
+                for tag_data in cid_data.values():
+                    current_incomplete_links.update(tag_data)
+            
+            # Check which of our tracked links are no longer in incomplete tasks
+            for link in list(self.our_active_links):
+                if link not in current_incomplete_links:
+                    self.our_active_links.remove(link)
+                    completed_links.append(link)
                     self.completed_count += 1
-                    LOGGER.info(f"[cleech] Completed GID: {gid}")
+                    LOGGER.info(f"[cleech] Completed link: {link}")
+                    
         except Exception as e:
             LOGGER.error(f"[cleech] Error checking completion: {e}")
-        return completed_gids
+            
+        return completed_links
 
     async def _update_progress(self):
-        if not self.status_message: return
+        if not self.status_message: 
+            return
+            
         try:
             progress = (self.completed_count / self.total_files * 100) if self.total_files > 0 else 0
             text = (
                 f"🌟 **Channel Leech in Progress**\n\n"
                 f"**Progress:** {self.completed_count}/{self.total_files} ({progress:.1f}%)\n"
-                f"**Active:** {len(self.our_active_gids)}/{self.max_concurrent} | **Pending:** {len(self.pending_files)}\n\n"
+                f"**Active:** {len(self.our_active_links)}/{self.max_concurrent} | **Pending:** {len(self.pending_files)}\n\n"
                 f"**Cancel:** `/cancel {str(self.mid)[:12]}`"
             )
             await edit_message(self.status_message, text)
@@ -264,11 +283,13 @@ class UniversalChannelLeechCoordinator(TaskListener):
     def _generate_clean_filename(self, file_info, message_id):
         original_filename = file_info['file_name']
         base_name = original_filename
+        
         if self.use_caption_as_filename and file_info.get('caption'):
             base_name = file_info['caption'].split('\n')[0].strip()
         
         clean_base = sanitize_filename(base_name)
         original_ext = os.path.splitext(original_filename)[1]
+        
         if not clean_base.lower().endswith(original_ext.lower()):
             clean_base += original_ext
         
@@ -278,12 +299,15 @@ class UniversalChannelLeechCoordinator(TaskListener):
     def _parse_arguments(self, args):
         parsed, i = {}, 0
         while i < len(args):
-            if args[i] == '-ch': parsed['channel'] = args[i+1]; i+=2
+            if args[i] == '-ch': 
+                parsed['channel'] = args[i+1]; i+=2
             elif args[i] == '-f':
                 text = args[i+1]
                 parsed['filter'] = text[1:-1].split() if text.startswith('"') else text.split(); i+=2
-            elif args[i] == '--no-caption': parsed['no_caption'] = True; i+=1
-            else: i+=1
+            elif args[i] == '--no-caption': 
+                parsed['no_caption'] = True; i+=1
+            else: 
+                i+=1
         return parsed
 
     def cancel_task(self):
@@ -354,7 +378,7 @@ async def channel_scan(client, message):
 
 @new_task
 async def universal_channel_leech_cmd(client, message):
-    """Handle /cleech with universal GID tracking"""
+    """Handle /cleech with database link tracking"""
     await UniversalChannelLeechCoordinator(client, message).new_event()
 
 # Register BOTH handlers
