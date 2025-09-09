@@ -10,10 +10,10 @@ class TelegramStatus:
         self._status = status
         self.listener = listener
         self._size = self.listener.size
-        # REMOVED database call from here
+        # REMOVED broken database call from here
 
     def __del__(self):
-        # REMOVED database call from here
+        # REMOVED broken database call from here
         pass
 
     def processed_bytes(self):
