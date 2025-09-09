@@ -3,7 +3,7 @@ from pyrogram.handlers import MessageHandler
 from pyrogram.errors import FloodWait
 from bot import bot, user, LOGGER
 from ..helper.ext_utils.bot_utils import new_task
-from ..helper.ext_utils.db_handler import DbManager as database # <--- THIS LINE IS NOW CORRECTED
+from ..helper.ext_utils.db_handler import DbManager as database # Restored correct import alias
 from ..helper.telegram_helper.message_utils import send_message, edit_message
 from ..helper.telegram_helper.filters import CustomFilters
 from ..helper.mirror_leech_utils.channel_scanner import ChannelScanner
@@ -161,9 +161,13 @@ class UniversalChannelLeechCoordinator(TaskListener):
             if not file_info: continue
             if self.filter_tags and not all(tag.lower() in file_info['search_text'].lower() for tag in self.filter_tags):
                 continue
-            
+
+            # ===============================================================
+            # CRITICAL FIX: Replaced 'check_file' with the correct 'check_file_exists'
+            # ===============================================================
             if await database().check_file_exists(file_unique_id=file_info.get('file_unique_id')):
                 continue
+            # ===============================================================
 
             if str(self.channel_chat_id).startswith('-100'):
                 message_link = f"https://t.me/c/{str(self.channel_chat_id)[4:]}/{message.id}"
