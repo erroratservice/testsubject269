@@ -161,13 +161,9 @@ class UniversalChannelLeechCoordinator(TaskListener):
             if not file_info: continue
             if self.filter_tags and not all(tag.lower() in file_info['search_text'].lower() for tag in self.filter_tags):
                 continue
-
-            # ===============================================================
-            # CRITICAL FIX: Replaced 'check_file' with the correct 'check_file_exists'
-            # ===============================================================
+            
             if await database().check_file_exists(file_unique_id=file_info.get('file_unique_id')):
                 continue
-            # ===============================================================
 
             if str(self.channel_chat_id).startswith('-100'):
                 message_link = f"https://t.me/c/{str(self.channel_chat_id)[4:]}/{message.id}"
