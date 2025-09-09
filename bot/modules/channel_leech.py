@@ -1,7 +1,7 @@
 from pyrogram.filters import command
 from pyrogram.handlers import MessageHandler
 from pyrogram.errors import FloodWait
-from bot import bot, user, LOGGER, user_data
+from bot import bot, user, LOGGER
 from ..helper.ext_utils.bot_utils import new_task
 from ..helper.ext_utils.db_handler import database
 from ..helper.telegram_helper.message_utils import send_message, edit_message
@@ -207,14 +207,20 @@ class UniversalChannelLeechCoordinator(TaskListener):
         gid = file_item['predicted_gid']
         
         try:
+            # ===============================================================
+            # FINAL FIX 1: Hardcode your command channel ID here
+            # ===============================================================
+            COMMAND_CHANNEL_ID = -1001234567890  # <--- IMPORTANT: REPLACE WITH YOUR CHANNEL ID
+            # ===============================================================
+
             clean_name = self._generate_clean_filename(file_item['file_info'], file_item['message_id'])
-            # Corrected command formatting to use quotes properly
-            leech_cmd = f'/leech {file_item["url"]} -n "{clean_name}"'
+            # FINAL FIX 2: Correctly format the command with quotes
+            leech_cmd = f'/leech "{file_item["url"]}" -n "{clean_name}"'
             
             self.our_active_gids.add(gid)
-            LOGGER.info(f"[cleech] Queued GID: {gid} | Name: {clean_name}")
+            LOGGER.info(f"[cleech] Queued GID: {gid} in command channel.")
             
-            await user.send_message(chat_id=bot.me.id, text=leech_cmd)
+            await user.send_message(chat_id=COMMAND_CHANNEL_ID, text=leech_cmd)
             await asyncio.sleep(3) # Give bot time to process the command
         except Exception as e:
             LOGGER.error(f"[cleech] Error starting GID {gid}: {e}")
@@ -225,10 +231,7 @@ class UniversalChannelLeechCoordinator(TaskListener):
         """Check completion using our perfectly predicted GIDs"""
         completed_gids = []
         try:
-            # Minimal debugging logs added
             current_incomplete_gids = {gid for v in (await database.get_incomplete_tasks()).values() for vv in v.values() for gid in vv}
-            LOGGER.info(f"[cleech] Incomplete GIDs from DB: {current_incomplete_gids}")
-            LOGGER.info(f"[cleech] GIDs we are tracking: {self.our_active_gids}")
             for gid in list(self.our_active_gids):
                 if gid not in current_incomplete_gids:
                     self.our_active_gids.remove(gid)
@@ -274,7 +277,6 @@ class UniversalChannelLeechCoordinator(TaskListener):
             clean_base += original_ext
         
         name, ext = os.path.splitext(clean_base)
-        # Corrected to not add extra quotes to the returned string
         return f"{name}.{message_id}{ext}"
 
     def _parse_arguments(self, args):
