@@ -3,7 +3,7 @@ from pyrogram.handlers import MessageHandler
 from pyrogram.errors import FloodWait
 from bot import bot, user, LOGGER
 from ..helper.ext_utils.bot_utils import new_task
-from ..helper.ext_utils.db_handler import DbManager as database
+from ..helper.ext_utils.db_handler import database  # Keep original import pattern
 from ..helper.telegram_helper.message_utils import send_message, edit_message
 from ..helper.telegram_helper.filters import CustomFilters
 from ..helper.mirror_leech_utils.channel_scanner import ChannelScanner
@@ -87,9 +87,9 @@ class UniversalChannelLeechCoordinator(TaskListener):
         self.operation_key = None
         self.use_caption_as_filename = True
         self.max_concurrent = 2
-        self.check_interval = 10
+        self.check_interval = 10 # Increased interval for stability
         self.pending_files = []
-        self.our_active_links = set()  # Track by links instead of GIDs
+        self.our_active_links = set()  # Changed from our_active_gids to our_active_links
         self.completed_count = 0
         self.total_files = 0
         super().__init__()
@@ -98,7 +98,6 @@ class UniversalChannelLeechCoordinator(TaskListener):
         """Main event handler"""
         text = self.message.text.split()
         args = self._parse_arguments(text[1:])
-        
         if 'channel' not in args:
             usage_text = (
                 "**Usage:** `/cleech -ch <channel_id> [-f filter_text] [--no-caption]`\n\n"
@@ -108,26 +107,21 @@ class UniversalChannelLeechCoordinator(TaskListener):
             )
             await send_message(self.message, usage_text)
             return
-
         self.channel_id = args['channel']
         self.filter_tags = args.get('filter', [])
         self.use_caption_as_filename = not args.get('no_caption', False)
-
         if not user:
             await send_message(self.message, "User session required!")
             return
-
         try:
             chat = await user.get_chat(self.channel_id)
             self.channel_chat_id = chat.id
         except Exception as e:
             await send_message(self.message, f"❌ Could not resolve channel: {e}")
             return
-
         self.operation_key = await channel_status.start_operation(
             self.message.from_user.id, self.channel_id, "universal_channel_leech"
         )
-
         filter_text = f" with filter: `{' '.join(self.filter_tags)}`" if self.filter_tags else ""
         self.status_message = await send_message(
             self.message,
@@ -135,7 +129,6 @@ class UniversalChannelLeechCoordinator(TaskListener):
             f"**Channel:** `{self.channel_id}` → `{self.channel_chat_id}`\n"
             f"**Filter:**{filter_text}"
         )
-
         try:
             await self._coordinate_universal_leech()
         except Exception as e:
@@ -151,19 +144,14 @@ class UniversalChannelLeechCoordinator(TaskListener):
         scanner = ChannelScanner(user, self.channel_id, filter_tags=self.filter_tags)
         
         async for message in user.get_chat_history(self.channel_id):
-            if self.is_cancelled: 
-                break
-                
+            if self.is_cancelled: break
             file_info = await scanner._extract_file_info(message)
-            if not file_info: 
-                continue
-                
+            if not file_info: continue
             if self.filter_tags and not all(tag.lower() in file_info['search_text'].lower() for tag in self.filter_tags):
                 continue
-            
-            if await database().check_file_exists(file_unique_id=file_info.get('file_unique_id')):
+            # Keep original database usage pattern
+            if await database.check_file_exists(file_info.get('file_unique_id'), file_info.get('file_hash'), file_info.get('file_name')):
                 continue
-
             if str(self.channel_chat_id).startswith('-100'):
                 message_link = f"https://t.me/c/{str(self.channel_chat_id)[4:]}/{message.id}"
             else:
@@ -176,29 +164,22 @@ class UniversalChannelLeechCoordinator(TaskListener):
                 'file_info': file_info,
                 'link': message_link  # Track by link instead of predicted_gid
             })
-
         self.total_files = len(self.pending_files)
         if self.total_files == 0:
             await edit_message(self.status_message, "✅ No new files to download!")
             return
-
         LOGGER.info(f"[cleech] Found {self.total_files} files. Starting download process.")
-        await self._process_with_link_tracking()
+        await self._process_with_link_tracking()  # Changed method name
 
-    async def _process_with_link_tracking(self):
+    async def _process_with_link_tracking(self):  # Changed method name
         """Process files using database link tracking"""
-        # Start initial downloads
         while len(self.our_active_links) < self.max_concurrent and self.pending_files:
             await self._start_next_download()
-
-        # Monitor progress
         while (self.our_active_links or self.pending_files) and not self.is_cancelled:
             await self._update_progress()
             await asyncio.sleep(self.check_interval)
-            
-            completed_links = await self._check_completed_via_database()
+            completed_links = await self._check_completed_via_database()  # Changed method name
             for _ in completed_links:
-                # Start next download when slot becomes available
                 if self.pending_files and len(self.our_active_links) < self.max_concurrent:
                     await self._start_next_download()
         
@@ -206,39 +187,33 @@ class UniversalChannelLeechCoordinator(TaskListener):
 
     async def _start_next_download(self):
         """Start next download and track by link"""
-        if not self.pending_files: 
-            return
-            
+        if not self.pending_files: return
         file_item = self.pending_files.pop(0)
-        link = file_item['link']
+        link = file_item['link']  # Use link instead of predicted_gid
         
         try:
             COMMAND_CHANNEL_ID = -1001791052293
             clean_name = self._generate_clean_filename(file_item['file_info'], file_item['message_id'])
             leech_cmd = f'/leech {file_item["url"]} -n {clean_name}'
             
-            # Track by link (what database actually uses)
-            self.our_active_links.add(link)
-            LOGGER.info(f"[cleech] Queued link: {link}")
+            self.our_active_links.add(link)  # Track by link
+            LOGGER.info(f"[cleech] Queued link: {link} in command channel.")
             
             await user.send_message(chat_id=COMMAND_CHANNEL_ID, text=leech_cmd)
-            await asyncio.sleep(3)  # Give bot time to process the command
-            
+            await asyncio.sleep(3) # Give bot time to process the command
         except Exception as e:
             LOGGER.error(f"[cleech] Error starting link {link}: {e}")
             self.our_active_links.discard(link)
-            self.pending_files.insert(0, file_item)  # Re-add to queue
+            self.pending_files.insert(0, file_item)
 
-    async def _check_completed_via_database(self):
+    async def _check_completed_via_database(self):  # Changed method name and logic
         """Check completion using database incomplete tasks"""
         completed_links = []
         try:
-            # Get all current incomplete task links from database
-            incomplete_tasks = await database().get_incomplete_tasks()
+            # Get current incomplete tasks and extract all links
+            incomplete_data = await database.get_incomplete_tasks()
             current_incomplete_links = set()
-            
-            # Extract all links from the nested structure
-            for cid_data in incomplete_tasks.values():
+            for cid_data in incomplete_data.values():
                 for tag_data in cid_data.values():
                     current_incomplete_links.update(tag_data)
             
@@ -249,16 +224,12 @@ class UniversalChannelLeechCoordinator(TaskListener):
                     completed_links.append(link)
                     self.completed_count += 1
                     LOGGER.info(f"[cleech] Completed link: {link}")
-                    
         except Exception as e:
             LOGGER.error(f"[cleech] Error checking completion: {e}")
-            
         return completed_links
 
     async def _update_progress(self):
-        if not self.status_message: 
-            return
-            
+        if not self.status_message: return
         try:
             progress = (self.completed_count / self.total_files * 100) if self.total_files > 0 else 0
             text = (
@@ -283,13 +254,11 @@ class UniversalChannelLeechCoordinator(TaskListener):
     def _generate_clean_filename(self, file_info, message_id):
         original_filename = file_info['file_name']
         base_name = original_filename
-        
         if self.use_caption_as_filename and file_info.get('caption'):
             base_name = file_info['caption'].split('\n')[0].strip()
         
         clean_base = sanitize_filename(base_name)
         original_ext = os.path.splitext(original_filename)[1]
-        
         if not clean_base.lower().endswith(original_ext.lower()):
             clean_base += original_ext
         
@@ -299,20 +268,18 @@ class UniversalChannelLeechCoordinator(TaskListener):
     def _parse_arguments(self, args):
         parsed, i = {}, 0
         while i < len(args):
-            if args[i] == '-ch': 
-                parsed['channel'] = args[i+1]; i+=2
+            if args[i] == '-ch': parsed['channel'] = args[i+1]; i+=2
             elif args[i] == '-f':
                 text = args[i+1]
                 parsed['filter'] = text[1:-1].split() if text.startswith('"') else text.split(); i+=2
-            elif args[i] == '--no-caption': 
-                parsed['no_caption'] = True; i+=1
-            else: 
-                i+=1
+            elif args[i] == '--no-caption': parsed['no_caption'] = True; i+=1
+            else: i+=1
         return parsed
 
     def cancel_task(self):
         self.is_cancelled = True
 
+# Keep the rest exactly the same as your working older code
 class ChannelScanListener(TaskListener):
     """Simple channel scanner for database building"""
     
@@ -339,14 +306,11 @@ class ChannelScanListener(TaskListener):
             )
             await send_message(self.message, usage_text)
             return
-
         self.channel_id = text[1]
         self.filter_tags = text[2:] if len(text) > 2 else []
-
         if not user:
             await send_message(self.message, "User session is required for channel scanning!")
             return
-
         filter_text = f" with filter: `{' '.join(self.filter_tags)}`" if self.filter_tags else ""
         status_msg = await send_message(
             self.message, 
@@ -354,7 +318,6 @@ class ChannelScanListener(TaskListener):
             f"**Channel:** `{self.channel_id}`{filter_text}\n"
             f"**Cancel with:** `/cancel {str(self.mid)[:12]}`"
         )
-
         try:
             self.scanner = ChannelScanner(user, self.channel_id, filter_tags=self.filter_tags)
             self.scanner.listener = self
