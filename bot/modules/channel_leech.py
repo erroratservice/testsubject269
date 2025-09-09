@@ -111,13 +111,13 @@ class UniversalChannelLeechCoordinator(TaskListener):
         filter_text = f" with filter: `{' '.join(self.filter_tags)}`" if self.filter_tags else ""
         self.status_message = await send_message(
             self.message,
-            f"**Channel Leech Initializing...**\n"
+            f"**Pipelined Channel Leech Initializing...**\n"
             f"**Channel:** `{self.channel_id}` → `{self.channel_chat_id}`\n"
             f"**Filter:**{filter_text}"
         )
 
         try:
-            await self._coordinate_universal_leech()
+            await self._coordinate_pipelined_leech()
         except Exception as e:
             LOGGER.error(f"[cleech] Coordination Error: {e}")
             await edit_message(self.status_message, f"Error: {str(e)}")
@@ -125,37 +125,89 @@ class UniversalChannelLeechCoordinator(TaskListener):
             if self.operation_key:
                 await channel_status.stop_operation(self.operation_key)
 
-    async def _coordinate_universal_leech(self):
-        """Main coordination with database link tracking and batch processing"""
-        await edit_message(self.status_message, f"**Scanning Channel...**")
+    async def _coordinate_pipelined_leech(self):
+        """Pipelined batch processing - scan and process simultaneously"""
+        await edit_message(self.status_message, f"**Starting Pipelined Channel Leech...**")
         scanner = ChannelScanner(user, self.channel_id, filter_tags=self.filter_tags)
         
-        # Batch processing configuration
+        # Batch configuration
         batch_size = 30
         batch_sleep = 2
-        batch_count = 0
         processed_messages = 0
         skipped_duplicates = 0
+        total_found = 0
         
-        async for message in user.get_chat_history(self.channel_id):
-            if self.is_cancelled: 
+        # Get message iterator
+        message_iterator = user.get_chat_history(self.channel_id)
+        current_batch = []
+        
+        try:
+            async for message in message_iterator:
+                if self.is_cancelled:
+                    break
+                    
+                processed_messages += 1
+                current_batch.append(message)
+                
+                # Process batch when it reaches batch_size
+                if len(current_batch) >= batch_size:
+                    batch_found, batch_skipped = await self._process_message_batch(current_batch, scanner)
+                    total_found += batch_found
+                    skipped_duplicates += batch_skipped
+                    
+                    await self._update_scan_progress(processed_messages, total_found, skipped_duplicates)
+                    
+                    # Start downloads for this batch immediately
+                    await self._process_current_batch()
+                    
+                    # Clear batch and sleep
+                    current_batch = []
+                    await asyncio.sleep(batch_sleep)
+                    
+            # Process remaining messages in the last batch
+            if current_batch and not self.is_cancelled:
+                batch_found, batch_skipped = await self._process_message_batch(current_batch, scanner)
+                total_found += batch_found
+                skipped_duplicates += batch_skipped
+                await self._process_current_batch()
+                
+            # Wait for all downloads to complete
+            await self._wait_for_completion()
+            
+        except Exception as e:
+            LOGGER.error(f"[cleech] Pipeline error: {e}")
+            raise
+
+    async def _process_message_batch(self, message_batch, scanner):
+        """Process a batch of messages and add to pending_files"""
+        batch_found = 0
+        batch_skipped = 0
+        
+        for message in message_batch:
+            if self.is_cancelled:
                 break
                 
-            processed_messages += 1
-            batch_count += 1
-            
             file_info = await scanner._extract_file_info(message)
-            if not file_info: 
+            if not file_info:
                 continue
                 
             if self.filter_tags and not all(tag.lower() in file_info['search_text'].lower() for tag in self.filter_tags):
                 continue
             
-            # DEBUG: Check if file exists
-            file_exists = await database.check_file_exists(file_info.get('file_unique_id'), file_info.get('file_hash'), file_info.get('file_name'))
+            # FIX: Check file exists using proper keyword arguments and prioritization
+            file_exists = False
+            if file_info.get('file_unique_id'):
+                file_exists = await database.check_file_exists(file_unique_id=file_info.get('file_unique_id'))
+                LOGGER.info(f"[cleech-debug] Checking by unique_id: {file_info.get('file_unique_id')} - Found: {file_exists}")
+            elif file_info.get('file_hash'):
+                file_exists = await database.check_file_exists(file_hash=file_info.get('file_hash'))
+                LOGGER.info(f"[cleech-debug] Checking by hash: {file_info.get('file_hash')} - Found: {file_exists}")
+            elif file_info.get('file_name'):
+                file_exists = await database.check_file_exists(file_name=file_info.get('file_name'))
+                LOGGER.info(f"[cleech-debug] Checking by name: {file_info.get('file_name')} - Found: {file_exists}")
             
             if file_exists:
-                skipped_duplicates += 1
+                batch_skipped += 1
                 LOGGER.info(f"[cleech-debug] Skipping duplicate: {file_info.get('file_name')}")
                 continue
             else:
@@ -173,54 +225,31 @@ class UniversalChannelLeechCoordinator(TaskListener):
                 'file_info': file_info,
                 'link': message_link
             })
-
-            # Batch processing with status updates and sleep
-            if batch_count >= batch_size:
-                await self._handle_scan_batch_complete(processed_messages, len(self.pending_files), batch_count, skipped_duplicates)
-                batch_count = 0
-                
-                # Sleep after each batch to respect rate limits
-                await asyncio.sleep(batch_sleep)
-
-        # Handle remaining messages if any
-        if batch_count > 0:
-            await self._handle_scan_batch_complete(processed_messages, len(self.pending_files), batch_count, skipped_duplicates)
-
-        LOGGER.info(f"[cleech-debug] Scan complete - Total: {processed_messages}, New: {len(self.pending_files)}, Skipped: {skipped_duplicates}")
-
-        self.total_files = len(self.pending_files)
-        if self.total_files == 0:
-            await edit_message(self.status_message, "**No new files to download!**")
-            return
-
-        await edit_message(self.status_message, f"**Found {self.total_files} files. Starting downloads...**")
-        await self._process_with_link_tracking()
-
-    async def _handle_scan_batch_complete(self, processed_messages, found_files, batch_count, skipped_duplicates):
-        """Handle scan batch completion with status update"""
-        try:
-            status_text = (
-                f"**Scanning Channel...**\n\n"
-                f"**Scanned:** {processed_messages} messages\n"
-                f"**Found:** {found_files} new files\n"
-                f"**Skipped:** {skipped_duplicates} duplicates\n"
-                f"**Batch:** {batch_count} messages processed"
-            )
+            batch_found += 1
             
-            # Only update if content has changed
-            if self._last_status_text != status_text:
-                await edit_message(self.status_message, status_text)
-                self._last_status_text = status_text
-                
-        except Exception as e:
-            if "MESSAGE_NOT_MODIFIED" not in str(e):
-                LOGGER.error(f"[cleech] Scan status update error: {e}")
+        return batch_found, batch_skipped
 
-    async def _process_with_link_tracking(self):
-        """Process files using database link tracking"""
+    async def _process_current_batch(self):
+        """Start downloads for current batch and manage concurrency"""
+        # Start downloads up to max concurrent limit
         while len(self.our_active_links) < self.max_concurrent and self.pending_files:
             await self._start_next_download()
-            
+        
+        # If we have pending files but all slots are full, wait a bit for slots to free up
+        if self.pending_files and len(self.our_active_links) >= self.max_concurrent:
+            # Quick check for completions to free up slots
+            completed_links = await self._check_completed_via_database()
+            for _ in completed_links:
+                if self.pending_files and len(self.our_active_links) < self.max_concurrent:
+                    await self._start_next_download()
+
+    async def _wait_for_completion(self):
+        """Wait for all remaining downloads to complete"""
+        self.total_files = self.completed_count + len(self.pending_files) + len(self.our_active_links)
+        
+        await edit_message(self.status_message, f"**Processing final {len(self.pending_files) + len(self.our_active_links)} downloads...**")
+        
+        # Continue processing until everything is done
         while (self.our_active_links or self.pending_files) and not self.is_cancelled:
             await self._update_progress()
             await asyncio.sleep(self.check_interval)
@@ -231,6 +260,26 @@ class UniversalChannelLeechCoordinator(TaskListener):
                     await self._start_next_download()
         
         await self._show_final_results()
+
+    async def _update_scan_progress(self, processed_messages, found_files, skipped_duplicates):
+        """Update progress during scanning phase"""
+        try:
+            active_downloads = len(self.our_active_links)
+            status_text = (
+                f"**Pipelined Channel Leech**\n\n"
+                f"**Scanned:** {processed_messages} messages\n"
+                f"**Found:** {found_files} new files | **Skipped:** {skipped_duplicates} duplicates\n"
+                f"**Active Downloads:** {active_downloads}/{self.max_concurrent}\n"
+                f"**Completed:** {self.completed_count}"
+            )
+            
+            if self._last_status_text != status_text:
+                await edit_message(self.status_message, status_text)
+                self._last_status_text = status_text
+                
+        except Exception as e:
+            if "MESSAGE_NOT_MODIFIED" not in str(e):
+                LOGGER.error(f"[cleech] Scan progress update error: {e}")
 
     async def _start_next_download(self):
         """Start next download and capture the actual command message ID for tracking"""
@@ -466,7 +515,7 @@ async def channel_scan(client, message):
 
 @new_task
 async def universal_channel_leech_cmd(client, message):
-    """Handle /cleech with database link tracking"""
+    """Handle /cleech with pipelined processing"""
     await UniversalChannelLeechCoordinator(client, message).new_event()
 
 # Register BOTH handlers
