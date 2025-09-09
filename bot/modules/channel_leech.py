@@ -15,6 +15,7 @@ import re
 import time
 import hashlib
 
+# This GID generation is now only for PREDICTION. The actual download will use its own.
 def generate_universal_telegram_gid(chat_id: int, message_id: int) -> str:
     """
     Generate the EXACT same deterministic GID used by TelegramDownloadHelper
@@ -174,7 +175,8 @@ class UniversalChannelLeechCoordinator(TaskListener):
                 'filename': file_info['file_name'],
                 'message_id': message.id,
                 'file_info': file_info,
-                'predicted_gid': generate_universal_telegram_gid(self.channel_chat_id, message.id)
+                # We use file_unique_id for tracking now, which is the bot's standard
+                'predicted_gid': file_info['file_unique_id']
             })
 
         self.total_files = len(self.pending_files)
@@ -207,15 +209,11 @@ class UniversalChannelLeechCoordinator(TaskListener):
         gid = file_item['predicted_gid']
         
         try:
-            # ===============================================================
-            # FINAL FIX 1: Hardcode your command channel ID here
-            # ===============================================================
-            COMMAND_CHANNEL_ID = -1001791052293  # <--- IMPORTANT: REPLACE WITH YOUR CHANNEL ID
-            # ===============================================================
+            COMMAND_CHANNEL_ID = -1001791052293
 
             clean_name = self._generate_clean_filename(file_item['file_info'], file_item['message_id'])
-            # FINAL FIX 2: Correctly format the command with quotes
-            leech_cmd = f'/leech {file_item["url"]} -n {clean_name}'
+            # Patched: Correctly format the command with quotes around the filename
+            leech_cmd = f'/leech {file_item["url"]} -n "{clean_name}"'
             
             self.our_active_gids.add(gid)
             LOGGER.info(f"[cleech] Queued GID: {gid} in command channel.")
@@ -233,6 +231,7 @@ class UniversalChannelLeechCoordinator(TaskListener):
         try:
             current_incomplete_gids = {gid for v in (await database.get_incomplete_tasks()).values() for vv in v.values() for gid in vv}
             for gid in list(self.our_active_gids):
+                # The GID from telegram_download is now file_unique_id, so we check that
                 if gid not in current_incomplete_gids:
                     self.our_active_gids.remove(gid)
                     completed_gids.append(gid)
@@ -371,4 +370,3 @@ bot.add_handler(MessageHandler(
     universal_channel_leech_cmd, 
     filters=command("cleech") & CustomFilters.authorized
 ))
-        
