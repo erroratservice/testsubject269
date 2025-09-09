@@ -13,6 +13,22 @@ import asyncio
 import os
 import re
 
+def remove_emoji(text):
+    """Remove emojis and special characters from text"""
+    emoji_pattern = re.compile(
+        '['
+        '\U0001F600-\U0001F64F'  # emoticons
+        '\U0001F300-\U0001F5FF'  # symbols & pictographs
+        '\U0001F680-\U0001F6FF'  # transport & map symbols
+        '\U0001F1E0-\U0001F1FF'  # flags (iOS)
+        '\U00002702-\U000027B0'  # dingbats
+        '\U000024C2-\U0001F251'  # enclosed characters
+        '\U0001F900-\U0001F9FF'  # supplemental symbols
+        '\U0001FA00-\U0001FA6F'  # chess symbols
+        ']+', flags=re.UNICODE
+    )
+    return emoji_pattern.sub('', text)
+
 def sanitize_filename(filename):
     """Clean filename sanitization with proper dot conversion"""
     import re
@@ -23,10 +39,6 @@ def sanitize_filename(filename):
         r'\U0001F600-\U0001F64F'  # emoticons
         r'\U0001F300-\U0001F5FF'  # symbols & pictographs
         r'\U0001F680-\U0001F6FF'  # transport & map symbols
-        r'\U00002702-\U000027B0'  # dingbats
-        r'\U000024C2-\U0001F251'  # enclosed characters
-        r'\U0001F900-\U0001F9FF'  # supplemental symbols
-        r'\U0001FA00-\U0001FA6F'  # chess symbols
         r'\U0001F1E0-\U0001F1FF'  # flags (iOS)
         r'\u2600-\u26FF\u2700-\u27BF'  # misc symbols
         r']+', flags=re.UNICODE
@@ -67,7 +79,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
         self.status_message = None
         self.operation_key = None
         self.use_caption_as_filename = True
-        self.max_concurrent = 4
+        self.max_concurrent = 2
         self.check_interval = 10
         self.pending_files = []
         self.our_active_links = set()
@@ -115,7 +127,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
         filter_text = f" with filter: `{' '.join(self.filter_tags)}`" if self.filter_tags else ""
         self.status_message = await send_message(
             self.message,
-            f"**Simple Channel Leech Starting...**\n"
+            f"**Channel Leech Starting...**\n"
             f"**Channel:** `{self.channel_id}` → `{self.channel_chat_id}`\n"
             f"**Filter:**{filter_text}"
         )
@@ -188,7 +200,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
             file_exists = False
             if file_info.get('file_unique_id'):
                 file_exists = await database.check_file_exists(file_unique_id=file_info.get('file_unique_id'))
-                LOGGER.info(f"[cleech-debug] Checking: {file_info.get('file_name')} - Found: {file_exists}")
             elif file_info.get('file_hash'):
                 file_exists = await database.check_file_exists(file_hash=file_info.get('file_hash'))
             elif file_info.get('file_name'):
@@ -196,7 +207,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
             
             if file_exists:
                 batch_skipped += 1
-                LOGGER.info(f"[cleech-debug] Skipping duplicate: {file_info.get('file_name')}")
                 continue
 
             # Add to download queue
@@ -241,8 +251,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
             
             self.our_active_links.add(actual_stored_url)
             self.link_to_file_mapping[actual_stored_url] = file_item
-            
-            LOGGER.info(f"[cleech-debug] Started download: {clean_name}")
             
         except Exception as e:
             LOGGER.error(f"[cleech] Error starting download: {e}")
@@ -296,20 +304,17 @@ class SimpleChannelLeechCoordinator(TaskListener):
         """Handle completion - save only successful downloads"""
         try:
             if completed_link not in self.link_to_file_mapping:
-                LOGGER.warning(f"[cleech-debug] No mapping for completed link: {completed_link}")
                 return False
             
             file_item = self.link_to_file_mapping[completed_link]
             
             # Only save successful completions to database
-            # TaskListener will prevent failed ones from reaching here
             await database.add_file_entry(
                 self.channel_chat_id,
                 file_item['message_id'],
                 file_item['file_info']
             )
             
-            LOGGER.info(f"[cleech-debug] Saved successful download: {file_item['file_info'].get('file_name')}")
             del self.link_to_file_mapping[completed_link]
             return True
             
