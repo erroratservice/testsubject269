@@ -48,6 +48,9 @@ from ..telegram_helper.message_utils import (
 class TaskListener(TaskConfig):
     def __init__(self):
         super().__init__()
+        # NEW: Simple failure tracking for channel leech
+        self.download_failed = False
+        self.upload_failed = False
 
     async def clean(self):
         try:
@@ -266,9 +269,6 @@ class TaskListener(TaskConfig):
         ):
             await database.rm_complete_task(self.message.link)
 
-        # Handle successful completion - centralized failure tracking
-        await self._handle_completion_success()
-
         msg = f"<b>Name: </b><code>{escape(self.name)}</code>\n\n<b>Size: </b>{get_readable_file_size(self.size)}"
         LOGGER.info(f"Task Done: {self.name}")
         if self.is_leech:
@@ -371,8 +371,10 @@ class TaskListener(TaskConfig):
         ):
             await database.rm_complete_task(self.message.link)
 
-        # Handle download failure - centralized failure tracking
-        await self._handle_completion_failure(f"download_error: {str(error)}")
+        # NEW: Mark as failed for channel leech files
+        if hasattr(self, 'is_channel_leech') and self.is_channel_leech:
+            self.download_failed = True
+            LOGGER.warning(f"Channel leech download failed: {self.name} - {str(error)}")
 
         async with queue_dict_lock:
             if self.mid in queued_dl:
@@ -410,8 +412,10 @@ class TaskListener(TaskConfig):
         ):
             await database.rm_complete_task(self.message.link)
 
-        # Handle upload failure - centralized failure tracking
-        await self._handle_completion_failure(f"upload_error: {str(error)}")
+        # NEW: Mark as failed for channel leech files
+        if hasattr(self, 'is_channel_leech') and self.is_channel_leech:
+            self.upload_failed = True
+            LOGGER.warning(f"Channel leech upload failed: {self.name} - {str(error)}")
 
         async with queue_dict_lock:
             if self.mid in queued_dl:
@@ -431,37 +435,3 @@ class TaskListener(TaskConfig):
             await clean_download(self.new_dir)
         if self.thumb and await aiopath.exists(self.thumb):
             await remove(self.thumb)
-
-    # NEW: Centralized completion handling methods
-    async def _handle_completion_success(self):
-        """Handle successful completion - remove from failed files"""
-        if (hasattr(self, 'file_unique_id') and 
-            hasattr(self, 'channel_id') and 
-            self.file_unique_id):
-            try:
-                await database.remove_failed_file_entry(self.file_unique_id)
-                LOGGER.info(f"Removed from failed files after success: {self.name}")
-            except Exception as e:
-                LOGGER.error(f"Error removing from failed files: {e}")
-
-    async def _handle_completion_failure(self, failure_reason):
-        """Handle completion failure - add to failed files"""
-        if (hasattr(self, 'channel_id') and 
-            hasattr(self, 'message_id') and 
-            hasattr(self, 'file_info') and
-            hasattr(self, 'expected_size') and
-            self.expected_size > 0):
-            try:
-                enhanced_file_info = self.file_info.copy()
-                if hasattr(self, 'size'):
-                    enhanced_file_info['actual_size'] = self.size
-                
-                await database.add_failed_file_entry(
-                    self.channel_id,
-                    self.message_id,
-                    enhanced_file_info,
-                    failure_reason[:100]
-                )
-                LOGGER.info(f"Added to failed files: {self.name} - {failure_reason}")
-            except Exception as e:
-                LOGGER.error(f"Error adding to failed files: {e}")
