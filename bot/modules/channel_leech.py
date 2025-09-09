@@ -208,7 +208,7 @@ class UniversalChannelLeechCoordinator(TaskListener):
         
         try:
             clean_name = self._generate_clean_filename(file_item['file_info'], file_item['message_id'])
-            # Ensure filename is enclosed in quotes for the command parser
+            # Corrected command formatting to use quotes properly
             leech_cmd = f'/leech {file_item["url"]} -n "{clean_name}"'
             
             self.our_active_gids.add(gid)
@@ -225,6 +225,7 @@ class UniversalChannelLeechCoordinator(TaskListener):
         """Check completion using our perfectly predicted GIDs"""
         completed_gids = []
         try:
+            # Minimal debugging logs added
             current_incomplete_gids = {gid for v in (await database.get_incomplete_tasks()).values() for vv in v.values() for gid in vv}
             LOGGER.info(f"[cleech] Incomplete GIDs from DB: {current_incomplete_gids}")
             LOGGER.info(f"[cleech] GIDs we are tracking: {self.our_active_gids}")
@@ -273,7 +274,7 @@ class UniversalChannelLeechCoordinator(TaskListener):
             clean_base += original_ext
         
         name, ext = os.path.splitext(clean_base)
-        # Return filename WITHOUT extra quotes
+        # Corrected to not add extra quotes to the returned string
         return f"{name}.{message_id}{ext}"
 
     def _parse_arguments(self, args):
@@ -368,3 +369,4 @@ bot.add_handler(MessageHandler(
     universal_channel_leech_cmd, 
     filters=command("cleech") & CustomFilters.authorized
 ))
+        
