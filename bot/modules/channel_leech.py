@@ -261,8 +261,7 @@ class UniversalChannelLeechCoordinator(TaskListener):
         if not clean_base.lower().endswith(original_ext.lower()):
             clean_base += original_ext
         
-        name, ext = os.path.splitext(clean_base)
-        return f"{name}.{message_id}{ext}"
+        return clean_base
 
     def _parse_arguments(self, args):
         parsed, i = {}, 0
