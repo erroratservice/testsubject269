@@ -32,16 +32,26 @@ def remove_emoji(text):
 def sanitize_filename(filename):
     """Sanitize filename by creating clean dot-separated names"""
     filename = remove_emoji(filename)
+    
+    # Replace underscores with spaces
     filename = re.sub(r'[_]+', ' ', filename)
-    filename = re.sub(r'[^\w\d\.\s-]', ' ', filename)
+    
+    # Only remove truly problematic characters for filenames
+    # Keep: letters, numbers, dots, spaces, hyphens, parentheses, brackets, colons
+    filename = re.sub(r'[<>:"/\\|?*]', ' ', filename)  # Only remove filesystem-forbidden chars
+    
+    # Clean up dots and spaces
     filename = re.sub(r'\s*\.\s*', '.', filename)
-    filename = re.sub(r'\.{2,}', '.', filename)
+    filename = re.sub(r'\.{2,}', '.', filename)  
     filename = re.sub(r'\s+', ' ', filename)
     filename = filename.strip(' .')
     filename = filename.replace(' ', '.')
+    
     if not filename:
         filename = "file"
+    
     return filename
+
 
 class UniversalChannelLeechCoordinator(TaskListener):
     """Universal coordinator for channel leech operations"""
