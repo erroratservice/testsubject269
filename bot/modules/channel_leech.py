@@ -3,7 +3,7 @@ from pyrogram.handlers import MessageHandler
 from pyrogram.errors import FloodWait
 from bot import bot, user, LOGGER
 from ..helper.ext_utils.bot_utils import new_task
-from ..helper.ext_utils.db_handler import database
+from ..helper.ext_utils.db_handler import DbManager
 from ..helper.telegram_helper.message_utils import send_message, edit_message
 from ..helper.telegram_helper.filters import CustomFilters
 from ..helper.mirror_leech_utils.channel_scanner import ChannelScanner
@@ -93,7 +93,7 @@ class UniversalChannelLeechCoordinator(TaskListener):
         self.max_concurrent = 2
         self.check_interval = 10 # Increased interval for stability
         self.pending_files = []
-        self.our_active_links = set()
+        self.our_active_links = set() # Switched from GID to Link tracking
         self.completed_count = 0
         self.total_files = 0
         super().__init__()
@@ -161,7 +161,7 @@ class UniversalChannelLeechCoordinator(TaskListener):
             if not file_info: continue
             if self.filter_tags and not all(tag.lower() in file_info['search_text'].lower() for tag in self.filter_tags):
                 continue
-            if await database.check_file_exists(file_info.get('file_unique_id'), file_info.get('file_hash'), file_info.get('file_name')):
+            if await DbManager().check_file(file_info['message_link']): # Check if link is in DB
                 continue
 
             if str(self.channel_chat_id).startswith('-100'):
@@ -225,7 +225,7 @@ class UniversalChannelLeechCoordinator(TaskListener):
         """Check completion by looking for the link in the database"""
         completed_links = []
         try:
-            incomplete_tasks = await database.get_incomplete_tasks()
+            incomplete_tasks = await DbManager().get_incomplete_tasks()
             current_incomplete_links = {task['link'] for task in incomplete_tasks}
 
             for link in list(self.our_active_links):
