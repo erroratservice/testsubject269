@@ -1,6 +1,6 @@
 from bot import INCOMPLETE_TASK_NOTIFIER
 from ...ext_utils.status_utils import MirrorStatus, get_readable_file_size, get_readable_time
-from bot.helper.ext_utils.db_handler import DbManger
+from bot.helper.ext_utils.db_handler import DbManager
 
 class TelegramStatus:
 
@@ -11,39 +11,39 @@ class TelegramStatus:
         self.listener = listener
         self._size = self.listener.size
         if self._status == 'dl' and INCOMPLETE_TASK_NOTIFIER:
-            DbManger().add_incomplete_task(self.listener.message.chat.id, self.listener.message.id, gid)
+            DbManager().add_incomplete_task(self.listener.message.chat.id, self.listener.message.link, self.listener.tag)
 
     def __del__(self):
         if self._status == 'dl' and INCOMPLETE_TASK_NOTIFIER:
-            DbManger().rm_incomplete_task(self.listener.message.chat.id, self.listener.message.id, self._gid)
+            DbManager().rm_complete_task(self.listener.message.link)
 
     def processed_bytes(self):
-        return get_readable_file_size(self._obj._processed_bytes)
+        return get_readable_file_size(self._obj.processed_bytes)
 
     def size(self):
         return get_readable_file_size(self._size)
 
     def status(self):
         if self._status == 'up':
-            return MirrorStatus.STATUS_UPLOADING
-        return MirrorStatus.STATUS_DOWNLOADING
+            return MirrorStatus.STATUS_UPLOAD
+        return MirrorStatus.STATUS_DOWNLOAD
 
     def name(self):
         return self.listener.name
 
     def progress(self):
         try:
-            progress_raw = self._obj._processed_bytes / self._size * 100
+            progress_raw = self._obj.processed_bytes / self._size * 100
         except:
             progress_raw = 0
         return f'{round(progress_raw, 2)}%'
 
     def speed(self):
-        return f'{get_readable_file_size(self._obj.speed())}/s'
+        return f'{get_readable_file_size(self._obj.speed)}/s'
 
     def eta(self):
         try:
-            seconds = (self._size - self._obj._processed_bytes) / self._obj.speed()
+            seconds = (self._size - self._obj.processed_bytes) / self._obj.speed
             return get_readable_time(seconds)
         except:
             return '-'
