@@ -26,27 +26,24 @@ def generate_universal_telegram_gid(chat_id: int, message_id: int) -> str:
 
 def extract_telegram_url_components(telegram_url: str) -> tuple:
     """Extract components from Telegram URL for GID generation"""
-    # Pattern for different Telegram URL formats
     patterns = [
         r't\.me/c/(\d+)/(\d+)',           # Private: t.me/c/123456789/456
         r't\.me/([^/\s]+)/(\d+)',         # Public: t.me/channel_name/456
     ]
-    
+
     for pattern in patterns:
         match = re.search(pattern, telegram_url)
         if match:
             chat_identifier = match.group(1)
             message_id = int(match.group(2))
-            
+
             if chat_identifier.isdigit():
-                # Private channel format: convert to full chat_id
                 chat_id = -int(f"100{chat_identifier}")
             else:
-                # Public channel: will be resolved at runtime
                 return chat_identifier, message_id, 'username'
-            
+
             return chat_id, message_id, 'chat_id'
-    
+
     return None, None, None
 
 def remove_emoji(text):
@@ -67,38 +64,18 @@ def remove_emoji(text):
 
 def sanitize_filename(filename):
     """Sanitize filename by creating clean dot-separated names"""
-    # Remove emojis first
     filename = remove_emoji(filename)
-    
-    # Replace underscores with spaces
     filename = re.sub(r'[_]+', ' ', filename)
-    
-    # Replace unwanted characters with spaces (not dots)
     filename = re.sub(r'[^\w\d\.\s-]', ' ', filename)
-    
-    # Remove spaces around existing dots
     filename = re.sub(r'\s*\.\s*', '.', filename)
-    
-    # Replace multiple dots with single dot
     filename = re.sub(r'\.{2,}', '.', filename)
-    
-    # Replace multiple spaces with single space
     filename = re.sub(r'\s+', ' ', filename)
-    
-    # Trim leading/trailing dots and spaces
     filename = filename.strip(' .')
-    
-    # Finally replace remaining spaces with dots
     filename = filename.replace(' ', '.')
-    
-    # Ensure we don't end up with empty filename
     if not filename:
         filename = "file"
-    
-    # Limit length
     if len(filename) > 200:
         filename = filename[:200]
-    
     return filename
 
 class UniversalChannelLeechCoordinator(TaskListener):
@@ -108,22 +85,17 @@ class UniversalChannelLeechCoordinator(TaskListener):
         self.client = client
         self.message = message
         self.channel_id = None
-        self.channel_chat_id = None  # Resolved numeric chat_id
+        self.channel_chat_id = None
         self.filter_tags = []
         self.status_message = None
         self.operation_key = None
         self.use_caption_as_filename = True
-        
-        # Smart queue configuration
-        self.max_concurrent = 2           # Max active downloads
-        self.check_interval = 10           # Check every 10 seconds
-        
-        # Track our downloads using perfect GID prediction
-        self.pending_files = []           # Files waiting to start
-        self.our_active_gids = set()      # Predicted GIDs we're tracking
+        self.max_concurrent = 2
+        self.check_interval = 10 # Increased interval for stability
+        self.pending_files = []
+        self.our_active_gids = set()
         self.completed_count = 0
         self.total_files = 0
-        
         super().__init__()
 
     async def new_event(self):
@@ -236,8 +208,8 @@ class UniversalChannelLeechCoordinator(TaskListener):
         
         try:
             clean_name = self._generate_clean_filename(file_item['file_info'], file_item['message_id'])
-            # Corrected line to remove extra quotes
-            leech_cmd = f"/leech {file_item['url']} -n {clean_name}"
+            # Ensure filename is enclosed in quotes for the command parser
+            leech_cmd = f'/leech {file_item["url"]} -n "{clean_name}"'
             
             self.our_active_gids.add(gid)
             LOGGER.info(f"[cleech] Queued GID: {gid} | Name: {clean_name}")
@@ -254,6 +226,8 @@ class UniversalChannelLeechCoordinator(TaskListener):
         completed_gids = []
         try:
             current_incomplete_gids = {gid for v in (await database.get_incomplete_tasks()).values() for vv in v.values() for gid in vv}
+            LOGGER.info(f"[cleech] Incomplete GIDs from DB: {current_incomplete_gids}")
+            LOGGER.info(f"[cleech] GIDs we are tracking: {self.our_active_gids}")
             for gid in list(self.our_active_gids):
                 if gid not in current_incomplete_gids:
                     self.our_active_gids.remove(gid)
@@ -299,7 +273,8 @@ class UniversalChannelLeechCoordinator(TaskListener):
             clean_base += original_ext
         
         name, ext = os.path.splitext(clean_base)
-        return f'"{name}.{message_id}{ext}"' # Add quotes here
+        # Return filename WITHOUT extra quotes
+        return f"{name}.{message_id}{ext}"
 
     def _parse_arguments(self, args):
         parsed, i = {}, 0
@@ -393,4 +368,3 @@ bot.add_handler(MessageHandler(
     universal_channel_leech_cmd, 
     filters=command("cleech") & CustomFilters.authorized
 ))
-        
