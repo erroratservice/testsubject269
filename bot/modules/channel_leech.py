@@ -3,7 +3,7 @@ from pyrogram.handlers import MessageHandler
 from pyrogram.errors import FloodWait
 from bot import bot, user, LOGGER
 from ..helper.ext_utils.bot_utils import new_task
-from ..helper.ext_utils.db_handler import DbManager as database # Restored correct import alias
+from ..helper.ext_utils.db_handler import DbManager
 from ..helper.telegram_helper.message_utils import send_message, edit_message
 from ..helper.telegram_helper.filters import CustomFilters
 from ..helper.mirror_leech_utils.channel_scanner import ChannelScanner
