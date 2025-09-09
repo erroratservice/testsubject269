@@ -39,7 +39,10 @@ class TelegramDownloadHelper:
 
     @property
     def speed(self):
-        return self._processed_bytes / (time() - self._start_time)
+        try:
+            return self._processed_bytes / (time() - self._start_time)
+        except ZeroDivisionError:
+            return 0
 
     async def _on_download_start(self, file_id, from_queue):
         self._id = file_id
@@ -136,3 +139,4 @@ class TelegramDownloadHelper:
     async def cancel_task(self):
         self._listener.is_cancelled = True
         LOGGER.info(f"Cancelling download: {self._listener.name}")
+        
