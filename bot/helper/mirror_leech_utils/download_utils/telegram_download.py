@@ -40,6 +40,7 @@ class TelegramDownloadHelper:
         if not from_queue and self.listener.multi <= 1:
             await sendStatusMessage(self.listener.message)
             LOGGER.info(f"Download from Telegram: {self.listener.name}")
+        # ADDED: Correctly register the task in the database
         if self.listener.isSuperGroup and INCOMPLETE_TASK_NOTIFIER:
             await DbManager().add_incomplete_task(self.listener.message.chat.id, self.listener.message.link, self.listener.tag)
 
@@ -55,6 +56,7 @@ class TelegramDownloadHelper:
         async with global_lock:
             if self._id in GLOBAL_GID:
                 GLOBAL_GID.remove(self._id)
+        # ADDED: Correctly remove the task from the database on error
         if self.listener.isSuperGroup and INCOMPLETE_TASK_NOTIFIER:
             await DbManager().rm_complete_task(self.listener.message.link)
         await self.listener.onDownloadError(error)
@@ -62,6 +64,7 @@ class TelegramDownloadHelper:
     async def _onDownloadComplete(self):
         async with global_lock:
             GLOBAL_GID.remove(self._id)
+        # ADDED: Correctly remove the task from the database on completion
         if self.listener.isSuperGroup and INCOMPLETE_TASK_NOTIFIER:
             await DbManager().rm_complete_task(self.listener.message.link)
         await self.listener.onDownloadComplete()
