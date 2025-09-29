@@ -42,6 +42,7 @@ from ..telegram_helper.button_build import ButtonMaker
 from ..telegram_helper.message_utils import (
     send_message,
     delete_status,
+    delete_message,
     update_status_message,
 )
 
@@ -263,6 +264,7 @@ class TaskListener(TaskConfig):
 
         msg = f"<b>Name: </b><code>{escape(self.name)}</code>\n\n<b>Size: </b>{get_readable_file_size(self.size)}"
         if self.is_leech:
+            await delete_message(self.message)
             msg += f"\n<b>Total Files: </b>{folders}"
             if mime_type != 0:
                 msg += f"\n<b>Corrupted Files: </b>{mime_type}"
