@@ -141,15 +141,25 @@ class SimpleChannelLeechCoordinator(TaskListener):
         processed_messages = 0
         skipped_duplicates = 0
         
-        # BETTER RESUME LOGIC: Start from the highest scanned message to skip ahead
+        # EFFICIENT RESUME: Restore pending and active downloads first
+        if self.resume_mode:
+            await self._restore_resume_state(scanner)
+            LOGGER.info(f"[cleech] Restored {len(self.pending_files)} pending, {len(self.our_active_links)} active")
+            
+            # Start sending pending commands immediately
+            while len(self.our_active_links) < self.max_concurrent and self.pending_files:
+                await self._start_next_download()
+            
+            # Start completion checking in background
+            if self.our_active_links or self.pending_files:
+                asyncio.create_task(self._continuous_completion_check())
+        
+        # EFFICIENT SCANNING: Start from AFTER the last scanned message
         offset = 0
-        if self.resume_from_msg_id:
-            offset = self.resume_from_msg_id
-            LOGGER.info(f"[cleech] Resuming from last success: message ID {offset}")
-        elif self.scanned_message_ids:
-            # If no success point, start from the newest scanned message
+        if self.scanned_message_ids:
+            # Start from the NEWEST scanned message to skip all old ones
             offset = max(self.scanned_message_ids)
-            LOGGER.info(f"[cleech] Resuming from last scanned: message ID {offset}")
+            LOGGER.info(f"[cleech] Scanning from message {offset} onwards (skipping {len(self.scanned_message_ids)} already scanned)")
         
         message_iterator = user.get_chat_history(
             self.channel_id,
@@ -157,24 +167,17 @@ class SimpleChannelLeechCoordinator(TaskListener):
         )
         
         current_batch = []
-        skip_count = 0  # Track how many we're skipping for logging
         
         try:
             async for message in message_iterator:
-                # Keep the safety check but add logging to see what's happening
+                # OPTIMIZATION: Since offset_id starts AFTER max scanned,
+                # we don't need to check scanned_message_ids anymore
+                # (unless there's out-of-order processing, keep for safety)
                 if message.id in self.scanned_message_ids:
-                    skip_count += 1
-                    if skip_count % 100 == 0:  # Log every 100 skips
-                        LOGGER.info(f"[cleech] Skipped {skip_count} already-scanned messages...")
                     continue
                 
                 if self.is_cancelled:
                     break
-                
-                # Reset skip counter when we find new messages
-                if skip_count > 0:
-                    LOGGER.info(f"[cleech] Finished skipping {skip_count} messages, processing new ones")
-                    skip_count = 0
                 
                 processed_messages += 1
                 current_batch.append(message)
@@ -196,10 +199,59 @@ class SimpleChannelLeechCoordinator(TaskListener):
             await self._show_final_results(processed_messages, skipped_duplicates)
         
         except Exception as e:
-            LOGGER.error(f"[cleech] Processing error: {e}")
+            LOGGER.error(f"[cleech] Processing error: {e}\"")
             await self._save_progress(interrupted=True)
             raise
-
+            
+    async def _restore_resume_state(self, scanner):
+        """Restore pending files and active downloads from saved progress"""
+        try:
+            progress = await database.get_leech_progress(self.message.from_user.id, self.channel_id)
+            if not progress:
+                return
+            
+            # Restore pending files
+            pending_msg_ids = progress.get("pending_files", [])
+            for msg_id in pending_msg_ids:
+                try:
+                    # Fetch the message to get file_info
+                    message = await user.get_messages(self.channel_id, msg_id)
+                    file_info = await scanner._extract_file_info(message)
+                    
+                    if file_info:
+                        if str(self.channel_chat_id).startswith('-100'):
+                            message_link = f"https://t.me/c/{str(self.channel_chat_id)[4:]}/{msg_id}"
+                        else:
+                            message_link = f"https://t.me/{self.channel_id.replace('@', '')}/{msg_id}"
+                        
+                        self.pending_files.append({
+                            'url': message_link,
+                            'filename': file_info['file_name'],
+                            'message_id': msg_id,
+                            'file_info': file_info,
+                            'link': message_link
+                        })
+                except Exception as e:
+                    LOGGER.warning(f"[cleech] Could not restore pending file {msg_id}: {e}")
+            
+            # Restore active downloads by checking tasks collection
+            from bot import config_dict
+            bot_token = config_dict.get('BOT_TOKEN', '')
+            bot_token_first_half = bot_token.split(':')[0] if ':' in bot_token else ''
+            
+            if bot_token_first_half:
+                if await database._db.tasks[bot_token_first_half].find_one():
+                    rows = database._db.tasks[bot_token_first_half].find({})
+                    async for row in rows:
+                        command_url = row["_id"]
+                        # Check if this command belongs to our channel leech
+                        # (Could add metadata to track this)
+                        self.our_active_links.add(command_url)
+                        LOGGER.info(f"[cleech] Restored active download: {command_url}")
+        
+        except Exception as e:
+            LOGGER.error(f"[cleech] Error restoring resume state: {e}")
+    
 
     async def _process_batch(self, message_batch, scanner, processed_so_far):
         batch_skipped = 0
