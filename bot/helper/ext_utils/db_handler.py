@@ -6,6 +6,7 @@ from pymongo.server_api import ServerApi
 from pymongo.errors import PyMongoError
 from datetime import datetime
 import os
+import re
 from bot import (
     user_data,
     rss_dict,
@@ -16,13 +17,8 @@ from bot import (
     qbit_options,
 )
 
-def normalize_filename(filename):
-    """Return lowercase filename without extension."""
-    return os.path.splitext(filename)[0].lower() if filename else ""
-
 def sanitize_filename(filename):
     """Sanitize the filename as in your channel_leech module."""
-    import re
     if not filename:
         return ""
     emoji_pattern = re.compile(
@@ -49,6 +45,21 @@ def sanitize_filename(filename):
     if not filename:
         filename = "file"
     return filename.lower()
+
+def get_duplicate_check_name(file_info):
+    """
+    Return the sanitized base file name for duplication check.
+    If there's a caption_first_line, use it; otherwise fall back to file_name.
+    """
+    base = None
+    caption_line = file_info.get("caption_first_line")
+    if caption_line:
+        base = caption_line.strip()
+    if not base:
+        base = file_info.get("file_name") or ""
+    sanitized = sanitize_filename(base)
+    base_name = os.path.splitext(sanitized)[0].lower()
+    return base_name
 
 class DbManager:
     def __init__(self):
@@ -264,41 +275,22 @@ class DbManager:
             return
         await self._db[name][BOT_ID].drop()
 
-    # Existing file catalog methods (PATCHED for sanitized name duplicate check)
-    async def add_file_entry(self, channel_id, message_id, file_data):
-        """Add file entry to catalog"""
-        try:
-            file_name = file_data.get("file_name")
-            document = {
-                "channel_id": str(channel_id),
-                "message_id": message_id,
-                "file_unique_id": file_data.get("file_unique_id"),
-                "file_name": file_name,
-                "base_file_name": normalize_filename(file_name),  # extensionless
-                "sanitized_file_name": sanitize_filename(file_name),  # sanitized
-                "caption_first_line": file_data.get("caption_first_line", ""),
-                "file_size": file_data.get("file_size", 0),
-                "mime_type": file_data.get("mime_type", ""),
-                "file_hash": file_data.get("file_hash"),
-                "search_text": file_data.get("search_text", ""),
-                "date_added": file_data.get("date"),
-                "indexed_at": datetime.utcnow()
-            }
-            await self._db.file_catalog.insert_one(document)
-        except PyMongoError as e:
-            LOGGER.error(f"Error adding file entry: {e}")
-
-    async def check_file_exists(self, file_unique_id=None, file_hash=None, file_name=None):
-        """Check if file exists in catalog using sanitized name"""
+    # --- Only this function is patched for duplicate check by sanitized name ---
+    async def check_file_exists(self, file_unique_id=None, file_hash=None, file_info=None):
+        """Check if file exists in catalog using sanitized base name (caption first line preferred)."""
         try:
             query = {}
             if file_unique_id:
                 query["file_unique_id"] = file_unique_id
             elif file_hash:
                 query["file_hash"] = file_hash
-            elif file_name:
-                sanitized = sanitize_filename(file_name)
-                query["sanitized_file_name"] = sanitized
+            elif file_info:
+                base_name = get_duplicate_check_name(file_info)
+                # Case-insensitive regex match for file_name in DB (without extension)
+                regex = re.compile(f"^{re.escape(base_name)}(\\.[^.]*)?$", re.IGNORECASE)
+                query["file_name"] = regex
+            else:
+                return False
             result = await self._db.file_catalog.find_one(query)
             return result is not None
         except PyMongoError as e:
@@ -328,7 +320,6 @@ class DbManager:
             LOGGER.error(f"Error getting catalog stats: {e}")
             return {}
 
-    # --- PATCH: Channel Leech Progress Persistence ---
     async def save_leech_progress(self, user_id, channel_id, data):
         """Save channel leech scan/download progress for user/channel."""
         try:
