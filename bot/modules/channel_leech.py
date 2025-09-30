@@ -91,9 +91,14 @@ class SimpleChannelLeechCoordinator(TaskListener):
         progress = await database.get_leech_progress(self.message.from_user.id, self.channel_id)
         if progress:
             self.resume_mode = True
-            self.resume_from_msg_id = progress.get("last_success_msg_id")
             self.scanned_message_ids = set(progress.get("scanned_message_ids", []))
-            await send_message(self.message, f"⏸️ Resuming previous channel leech from message {self.resume_from_msg_id}.")
+            self.resume_from_msg_id = progress.get("last_success_msg_id")
+            if self.resume_from_msg_id is None and self.scanned_message_ids:
+                self.resume_from_msg_id = max(self.scanned_message_ids)
+            if self.resume_from_msg_id is not None:
+                await send_message(self.message, f"⏸️ Resuming previous channel leech from message {self.resume_from_msg_id}.")
+            else:
+                await send_message(self.message, "⏸️ Resuming previous channel leech from the beginning (no resume point found).")
         else:
             self.scanned_message_ids = set()
             self.resume_from_msg_id = None
