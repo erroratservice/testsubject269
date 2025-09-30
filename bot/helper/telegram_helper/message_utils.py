@@ -104,26 +104,25 @@ async def delete_status():
             except Exception as e:
                 LOGGER.error(str(e))
 
+
 async def get_tg_link_message(link):
     message = None
     links = []
     if link.startswith("https://t.me/"):
         private = False
         msg = re_match(
-            r"https://t.me/(?:c/)?([^/]+)(?:/[^/]+)?/([0-9-]+)", link
+            r"https:\/\/t\.me\/(?:c\/)?([^\/]+)(?:\/[^\/]+)?\/([0-9-]+)", link
         )
     else:
         private = True
         msg = re_match(
-            r"tg://openmessage?user_id=([0-9]+)&message_id=([0-9-]+)", link
+            r"tg:\/\/openmessage\?user_id=([0-9]+)&message_id=([0-9-]+)", link
         )
         if not user:
             raise TgLinkException("USER_SESSION_STRING required for this private link!")
 
     chat = msg[1]
     msg_id = msg[2]
-    
-    # Handle message ID ranges
     if "-" in msg_id:
         start_id, end_id = msg_id.split("-")
         msg_id = start_id = int(start_id)
@@ -144,77 +143,32 @@ async def get_tg_link_message(link):
     else:
         msg_id = int(msg_id)
 
-    # Improved chat ID handling with multiple format attempts
-    chat_ids_to_try = []
-    
     if chat.isdigit():
-        if private:
-            # For private chats, try multiple formats
-            chat_ids_to_try = [
-                int(chat),
-                f"-100{chat}",
-                f"-{chat}"
-            ]
-        else:
-            # For public channels, try different formats
-            chat_ids_to_try = [
-                int(f"-100{chat}"),
-                int(chat),
-                f"-{chat}",
-                chat  # Keep original as string for username resolution
-            ]
-    else:
-        # Username format
-        chat_ids_to_try = [chat]
+        chat = int(chat) if private else int(f"-100{chat}")
 
-    # Try bot client first for public channels
     if not private:
-        for chat_id in chat_ids_to_try:
-            try:
-                message = await bot.get_messages(chat_id=chat_id, message_ids=msg_id)
-                if message and not message.empty:
-                    return (links, "bot") if links else (message, "bot")
-            except Exception as e:
-                LOGGER.warning(f"Bot client failed for chat_id {chat_id}: {e}")
-                continue
-        
-        # If bot fails, mark as private and try user client
-        private = True
+        try:
+            message = await bot.get_messages(chat_id=chat, message_ids=msg_id)
+            if message.empty:
+                private = True
+        except Exception as e:
+            private = True
+            if not user:
+                raise e
 
-    # Try user client for private channels or when bot fails
-    if private and user:
-        # Refresh dialogs for better reliability
+    if not private:
+        return (links, "bot") if links else (message, "bot")
+    elif user:
         try:
-            async for _ in user.get_dialogs(limit=100):
-                pass
+            user_message = await user.get_messages(chat_id=chat, message_ids=msg_id)
         except Exception as e:
-            LOGGER.warning(f"Dialog refresh failed: {e}")
-        
-        for chat_id in chat_ids_to_try:
-            try:
-                user_message = await user.get_messages(chat_id=chat_id, message_ids=msg_id)
-                if user_message and not user_message.empty:
-                    return (links, "user") if links else (user_message, "user")
-            except Exception as e:
-                LOGGER.warning(f"User client failed for chat_id {chat_id}: {e}")
-                continue
-        
-        # Final attempt with original chat format
-        try:
-            # Try to resolve chat first
-            resolved_chat = await user.get_chat(chat)
-            user_message = await user.get_messages(chat_id=resolved_chat.id, message_ids=msg_id)
-            if user_message and not user_message.empty:
-                return (links, "user") if links else (user_message, "user")
-        except Exception as e:
-            LOGGER.error(f"Final resolution attempt failed: {e}")
-            raise TgLinkException(f"You don't have access to this chat! ERROR: {e}") from e
-    
-    # If no user client available for private channels
-    if private and not user:
-        raise TgLinkException("USER_SESSION_STRING required for this private link!")
-    
-    raise TgLinkException("Unable to access the chat with any available method!")
+            raise TgLinkException(
+                f"You don't have access to this chat!. ERROR: {e}"
+            ) from e
+        if not user_message.empty:
+            return (links, "user") if links else (user_message, "user")
+    else:
+        raise TgLinkException("Private: Please report!")
 
 
 async def update_status_message(sid, force=False):
