@@ -61,7 +61,7 @@ def get_duplicate_check_name(file_info):
     base_name = os.path.splitext(sanitized)[0].lower()
     return base_name
 
-COMMON_EXTENSIONS = [".mp4", ".mkv"]
+COMMON_EXTENSIONS = [".mp4", ".mkv", ".avi", ".mov", ".wmv"]
 
 class DbManager:
     def __init__(self):
@@ -301,25 +301,28 @@ class DbManager:
         """
         Check if file exists in catalog using sanitized base name + common extensions.
         Prefer caption_first_line, fallback to file_name field.
+        Includes debug logging.
         """
         try:
-            # Check by unique_id or file_hash if possible
             if file_unique_id:
                 result = await self._db.file_catalog.find_one({"file_unique_id": file_unique_id})
+                LOGGER.info(f"[DuplicateCheck] Query by file_unique_id: {file_unique_id} -> {bool(result)}")
                 if result:
                     return True
             if file_hash:
                 result = await self._db.file_catalog.find_one({"file_hash": file_hash})
+                LOGGER.info(f"[DuplicateCheck] Query by file_hash: {file_hash} -> {bool(result)}")
                 if result:
                     return True
-            # Otherwise, do extension brute-force
             if file_info:
                 base_name = get_duplicate_check_name(file_info)
+                LOGGER.info(f"[DuplicateCheck] Base name: {base_name}")
                 for ext in COMMON_EXTENSIONS:
                     for field in ("caption_first_line", "file_name"):
                         value = base_name + ext
                         query = {field: value}
                         result = await self._db.file_catalog.find_one(query)
+                        LOGGER.info(f"[DuplicateCheck] Query: {query} -> {bool(result)}")
                         if result:
                             return True
             return False
