@@ -18,9 +18,11 @@ from bot import (
 )
 
 def sanitize_filename(filename):
-    """Sanitize the filename as in your channel_leech module."""
+    """Clean filename sanitization matching channel_leech.py exactly - NO lowercase conversion"""
     if not filename:
         return ""
+    
+    import re
     emoji_pattern = re.compile(
         r'['
         r'\U0001F600-\U0001F64F'
@@ -34,17 +36,24 @@ def sanitize_filename(filename):
         r'\u2600-\u26FF\u2700-\u27BF'
         r']+', flags=re.UNICODE
     )
+    
+    # Remove emojis
     filename = emoji_pattern.sub('', filename)
+    # Replace special chars with dots
     filename = filename.replace('+', '.')
     filename = filename.replace('-', '.')
     filename = filename.replace(' ', '.')
+    # Remove brackets and invalid chars
     filename = re.sub(r'[\[\]\(\)\{\}]', '', filename)
     filename = re.sub(r'[<>:"/\\|?*]', '', filename)
+    # Collapse multiple dots
     filename = re.sub(r'\.{2,}', '.', filename)
+    # Strip leading/trailing dots
     filename = filename.strip('.')
+    
     if not filename:
         filename = "file"
-    return filename.lower()
+    return filename 
 
 def get_duplicate_check_name(file_info):
     """
@@ -55,12 +64,17 @@ def get_duplicate_check_name(file_info):
     caption_line = file_info.get("caption_first_line")
     if caption_line:
         base = caption_line.strip()
+    
     if not base:
         base = file_info.get("file_name") or ""
+    
+    # Sanitize WITHOUT lowercasing (sanitize_filename no longer lowercases)
     sanitized = sanitize_filename(base)
-    base_name = os.path.splitext(sanitized)[0].lower()
+    # Remove extension for base name
+    base_name = os.path.splitext(sanitized)[0]
+    
     return base_name
-
+    
 COMMON_EXTENSIONS = [".mp4", ".mkv", ".avi", ".mov", ".wmv"]
 
 class DbManager:
@@ -299,33 +313,44 @@ class DbManager:
 
     async def check_file_exists(self, file_unique_id=None, file_hash=None, file_info=None):
         """
-        Check if file exists in catalog using sanitized base name + common extensions.
-        Prefer caption_first_line, fallback to file_name field.
-        Includes debug logging.
+        Check if file exists in catalog.
+        Priority: 1) sanitized filename (case-insensitive regex)
+                  2) file_unique_id
+                  3) file_hash
         """
         try:
+            # FIRST PRIORITY: Check by sanitized filename with case-insensitive regex
+            if file_info:
+                base_name = get_duplicate_check_name(file_info)
+                LOGGER.info(f"[DuplicateCheck] Base name: {base_name}")
+                
+                # Try both caption_first_line and file_name fields
+                for ext in COMMON_EXTENSIONS:
+                    for field in ("caption_first_line", "file_name"):
+                        value = base_name + ext
+                        # Use case-insensitive regex to match stored filenames
+                        query = {field: {"$regex": f"^{re.escape(value)}$", "$options": "i"}}
+                        result = await self._db.file_catalog.find_one(query)
+                        LOGGER.info(f"[DuplicateCheck] Query {field}: {value} -> {bool(result)}")
+                        if result:
+                            return True
+            
+            # SECOND PRIORITY: Check by file_unique_id
             if file_unique_id:
                 result = await self._db.file_catalog.find_one({"file_unique_id": file_unique_id})
                 LOGGER.info(f"[DuplicateCheck] Query by file_unique_id: {file_unique_id} -> {bool(result)}")
                 if result:
                     return True
+            
+            # THIRD PRIORITY: Check by file_hash
             if file_hash:
                 result = await self._db.file_catalog.find_one({"file_hash": file_hash})
                 LOGGER.info(f"[DuplicateCheck] Query by file_hash: {file_hash} -> {bool(result)}")
                 if result:
                     return True
-            if file_info:
-                base_name = get_duplicate_check_name(file_info)
-                LOGGER.info(f"[DuplicateCheck] Base name: {base_name}")
-                for ext in COMMON_EXTENSIONS:
-                    for field in ("caption_first_line", "file_name"):
-                        value = base_name + ext
-                        query = {field: value}
-                        result = await self._db.file_catalog.find_one(query)
-                        LOGGER.info(f"[DuplicateCheck] Query: {query} -> {bool(result)}")
-                        if result:
-                            return True
+            
             return False
+        
         except PyMongoError as e:
             LOGGER.error(f"Error checking file exists: {e}")
             return False
