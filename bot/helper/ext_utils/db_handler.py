@@ -322,7 +322,6 @@ class DbManager:
             # FIRST PRIORITY: Check by sanitized filename with case-insensitive regex
             if file_info:
                 base_name = get_duplicate_check_name(file_info)
-                LOGGER.info(f"[DuplicateCheck] Base name: {base_name}")
                 
                 # Try both caption_first_line and file_name fields
                 for ext in COMMON_EXTENSIONS:
@@ -331,21 +330,18 @@ class DbManager:
                         # Use case-insensitive regex to match stored filenames
                         query = {field: {"$regex": f"^{re.escape(value)}$", "$options": "i"}}
                         result = await self._db.file_catalog.find_one(query)
-                        LOGGER.info(f"[DuplicateCheck] Query {field}: {value} -> {bool(result)}")
                         if result:
                             return True
             
             # SECOND PRIORITY: Check by file_unique_id
             if file_unique_id:
                 result = await self._db.file_catalog.find_one({"file_unique_id": file_unique_id})
-                LOGGER.info(f"[DuplicateCheck] Query by file_unique_id: {file_unique_id} -> {bool(result)}")
                 if result:
                     return True
             
             # THIRD PRIORITY: Check by file_hash
             if file_hash:
                 result = await self._db.file_catalog.find_one({"file_hash": file_hash})
-                LOGGER.info(f"[DuplicateCheck] Query by file_hash: {file_hash} -> {bool(result)}")
                 if result:
                     return True
             
