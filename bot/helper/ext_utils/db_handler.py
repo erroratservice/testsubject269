@@ -20,6 +20,36 @@ def normalize_filename(filename):
     """Return lowercase filename without extension."""
     return os.path.splitext(filename)[0].lower() if filename else ""
 
+def sanitize_filename(filename):
+    """Sanitize the filename as in your channel_leech module."""
+    import re
+    if not filename:
+        return ""
+    emoji_pattern = re.compile(
+        r'['
+        r'\U0001F600-\U0001F64F'
+        r'\U0001F300-\U0001F5FF'
+        r'\U0001F680-\U0001F6FF'
+        r'\U00002702-\U000027B0'
+        r'\U000024C2-\U0001F251'
+        r'\U0001F900-\U0001F9FF'
+        r'\U0001FA00-\U0001FA6F'
+        r'\U0001F1E0-\U0001F1FF'
+        r'\u2600-\u26FF\u2700-\u27BF'
+        r']+', flags=re.UNICODE
+    )
+    filename = emoji_pattern.sub('', filename)
+    filename = filename.replace('+', '.')
+    filename = filename.replace('-', '.')
+    filename = filename.replace(' ', '.')
+    filename = re.sub(r'[\[\]\(\)\{\}]', '', filename)
+    filename = re.sub(r'[<>:"/\\|?*]', '', filename)
+    filename = re.sub(r'\.{2,}', '.', filename)
+    filename = filename.strip('.')
+    if not filename:
+        filename = "file"
+    return filename.lower()
+
 class DbManager:
     def __init__(self):
         self._return = False
@@ -234,16 +264,18 @@ class DbManager:
             return
         await self._db[name][BOT_ID].drop()
 
-    # Existing file catalog methods (PATCHED for extension-insensitive duplicate check)
+    # Existing file catalog methods (PATCHED for sanitized name duplicate check)
     async def add_file_entry(self, channel_id, message_id, file_data):
         """Add file entry to catalog"""
         try:
+            file_name = file_data.get("file_name")
             document = {
                 "channel_id": str(channel_id),
                 "message_id": message_id,
                 "file_unique_id": file_data.get("file_unique_id"),
-                "file_name": file_data.get("file_name"),
-                "base_file_name": normalize_filename(file_data.get("file_name")),  # PATCH: extensionless
+                "file_name": file_name,
+                "base_file_name": normalize_filename(file_name),  # extensionless
+                "sanitized_file_name": sanitize_filename(file_name),  # sanitized
                 "caption_first_line": file_data.get("caption_first_line", ""),
                 "file_size": file_data.get("file_size", 0),
                 "mime_type": file_data.get("mime_type", ""),
@@ -257,7 +289,7 @@ class DbManager:
             LOGGER.error(f"Error adding file entry: {e}")
 
     async def check_file_exists(self, file_unique_id=None, file_hash=None, file_name=None):
-        """Check if file exists in catalog (extension-insensitive)"""
+        """Check if file exists in catalog using sanitized name"""
         try:
             query = {}
             if file_unique_id:
@@ -265,8 +297,8 @@ class DbManager:
             elif file_hash:
                 query["file_hash"] = file_hash
             elif file_name:
-                base_file_name = normalize_filename(file_name)
-                query["base_file_name"] = base_file_name
+                sanitized = sanitize_filename(file_name)
+                query["sanitized_file_name"] = sanitized
             result = await self._db.file_catalog.find_one(query)
             return result is not None
         except PyMongoError as e:
