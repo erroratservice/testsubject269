@@ -152,7 +152,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
             
             # Start completion checking in background
             if self.our_active_links or self.pending_files:
-                asyncio.create_task(self._continuous_completion_check())
+                asyncio.create_task(self._wait_for_completion())
         
         # EFFICIENT SCANNING: Start from AFTER the last scanned message
         offset = 0
