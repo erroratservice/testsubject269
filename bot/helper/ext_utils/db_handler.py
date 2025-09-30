@@ -5,6 +5,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo.server_api import ServerApi
 from pymongo.errors import PyMongoError
 from datetime import datetime
+import os
 from bot import (
     user_data,
     rss_dict,
@@ -14,6 +15,10 @@ from bot import (
     aria2_options,
     qbit_options,
 )
+
+def normalize_filename(filename):
+    """Return lowercase filename without extension."""
+    return os.path.splitext(filename)[0].lower() if filename else ""
 
 class DbManager:
     def __init__(self):
@@ -229,7 +234,7 @@ class DbManager:
             return
         await self._db[name][BOT_ID].drop()
 
-    # Existing file catalog methods
+    # Existing file catalog methods (PATCHED for extension-insensitive duplicate check)
     async def add_file_entry(self, channel_id, message_id, file_data):
         """Add file entry to catalog"""
         try:
@@ -238,6 +243,7 @@ class DbManager:
                 "message_id": message_id,
                 "file_unique_id": file_data.get("file_unique_id"),
                 "file_name": file_data.get("file_name"),
+                "base_file_name": normalize_filename(file_data.get("file_name")),  # PATCH: extensionless
                 "caption_first_line": file_data.get("caption_first_line", ""),
                 "file_size": file_data.get("file_size", 0),
                 "mime_type": file_data.get("mime_type", ""),
@@ -251,7 +257,7 @@ class DbManager:
             LOGGER.error(f"Error adding file entry: {e}")
 
     async def check_file_exists(self, file_unique_id=None, file_hash=None, file_name=None):
-        """Check if file exists in catalog"""
+        """Check if file exists in catalog (extension-insensitive)"""
         try:
             query = {}
             if file_unique_id:
@@ -259,10 +265,8 @@ class DbManager:
             elif file_hash:
                 query["file_hash"] = file_hash
             elif file_name:
-                query["$or"] = [
-                    {"file_name": {"$regex": file_name, "$options": "i"}},
-                    {"caption_first_line": {"$regex": file_name, "$options": "i"}}
-                ]
+                base_file_name = normalize_filename(file_name)
+                query["base_file_name"] = base_file_name
             result = await self._db.file_catalog.find_one(query)
             return result is not None
         except PyMongoError as e:
