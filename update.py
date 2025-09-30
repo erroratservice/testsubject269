@@ -77,10 +77,6 @@ UPSTREAM_BRANCH = environ.get("UPSTREAM_BRANCH", "")
 if len(UPSTREAM_BRANCH) == 0:
     UPSTREAM_BRANCH = "master"
 
-# -------- PATCH: Uninstall pyrofork and install version 2.2.11 --------
-srun(["pip3", "uninstall", "-y", "pyrofork"])
-srun(["pip3", "install", "pyrofork==2.2.11"])
-
 if UPSTREAM_REPO is not None:
     if path.exists(".git"):
         srun(["rm", "-rf", ".git"])
