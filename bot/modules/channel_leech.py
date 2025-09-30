@@ -141,22 +141,25 @@ class SimpleChannelLeechCoordinator(TaskListener):
         processed_messages = 0
         skipped_duplicates = 0
         
-        # Efficient resume with skip counting
+        # EFFICIENT RESUME: Restore pending and active downloads first
+        if self.resume_mode:
+            await self._restore_resume_state(scanner)
+            LOGGER.info(f"[cleech] Restored {len(self.pending_files)} pending, {len(self.our_active_links)} active")
+            
+            # Start sending pending commands immediately
+            while len(self.our_active_links) < self.max_concurrent and self.pending_files:
+                await self._start_next_download()
+            
+            # Start completion checking in background
+            if self.our_active_links or self.pending_files:
+                asyncio.create_task(self._wait_for_completion())
+        
+        # EFFICIENT SCANNING: Start from AFTER the last scanned message
         offset = 0
-        skip_count = 0
-        
-        if self.resume_from_msg_id:
-            offset = self.resume_from_msg_id
-            LOGGER.info(f"[cleech] Resuming from last success: message ID {offset}")
-        elif self.scanned_message_ids:
+        if self.scanned_message_ids:
+            # Start from the NEWEST scanned message to skip all old ones
             offset = max(self.scanned_message_ids)
-            LOGGER.info(f"[cleech] Resuming from last scanned: message ID {offset}")
-        
-        # FIXED: Start completion checking immediately if there are active downloads
-        completion_task = None
-        if self.our_active_links or self.pending_files:
-            LOGGER.info(f"[cleech] Starting completion check task with {len(self.our_active_links)} active, {len(self.pending_files)} pending")
-            completion_task = asyncio.create_task(self._wait_for_completion())
+            LOGGER.info(f"[cleech] Scanning from message {offset} onwards (skipping {len(self.scanned_message_ids)} already scanned)")
         
         message_iterator = user.get_chat_history(
             self.channel_id,
@@ -167,20 +170,14 @@ class SimpleChannelLeechCoordinator(TaskListener):
         
         try:
             async for message in message_iterator:
-                # Keep safety check with progress logging
+                # OPTIMIZATION: Since offset_id starts AFTER max scanned,
+                # we don't need to check scanned_message_ids anymore
+                # (unless there's out-of-order processing, keep for safety)
                 if message.id in self.scanned_message_ids:
-                    skip_count += 1
-                    if skip_count % 100 == 0:
-                        LOGGER.info(f"[cleech] Skipped {skip_count} already-scanned messages...")
                     continue
                 
                 if self.is_cancelled:
                     break
-                
-                # Log when skipping is done
-                if skip_count > 0:
-                    LOGGER.info(f"[cleech] Finished skipping {skip_count} messages, processing new ones")
-                    skip_count = 0
                 
                 processed_messages += 1
                 current_batch.append(message)
@@ -192,28 +189,17 @@ class SimpleChannelLeechCoordinator(TaskListener):
                     current_batch = []
                     await asyncio.sleep(batch_sleep)
                     await self._save_progress()
-                
-                # Start completion task if not already started and we have downloads
-                if completion_task is None and (self.our_active_links or self.pending_files):
-                    LOGGER.info(f"[cleech] Starting completion check task")
-                    completion_task = asyncio.create_task(self._wait_for_completion())
             
             if current_batch and not self.is_cancelled:
                 batch_skipped = await self._process_batch(current_batch, scanner, processed_messages)
                 skipped_duplicates += batch_skipped
                 await self._save_progress()
             
-            # Wait for completion task if it was started
-            if completion_task:
-                await completion_task
-            elif self.our_active_links or self.pending_files:
-                # Start it now if we have downloads but task wasn't created yet
-                await self._wait_for_completion()
-            
+            await self._wait_for_completion()
             await self._show_final_results(processed_messages, skipped_duplicates)
         
         except Exception as e:
-            LOGGER.error(f"[cleech] Processing error: {e}")
+            LOGGER.error(f"[cleech] Processing error: {e}\"")
             await self._save_progress(interrupted=True)
             raise
             
