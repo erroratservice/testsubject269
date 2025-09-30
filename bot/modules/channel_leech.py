@@ -68,7 +68,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
         self.operation_key = None
         self.use_caption_as_filename = True
         self.max_concurrent = 5
-        self.check_interval = 15
+        self.check_interval = 10
         self.pending_files = []
         self.our_active_links = set()
         self.completed_count = 0
