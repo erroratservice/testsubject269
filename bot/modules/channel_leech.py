@@ -140,37 +140,66 @@ class SimpleChannelLeechCoordinator(TaskListener):
         batch_sleep = 2
         processed_messages = 0
         skipped_duplicates = 0
-
+        
+        # BETTER RESUME LOGIC: Start from the highest scanned message to skip ahead
+        offset = 0
+        if self.resume_from_msg_id:
+            offset = self.resume_from_msg_id
+            LOGGER.info(f"[cleech] Resuming from last success: message ID {offset}")
+        elif self.scanned_message_ids:
+            # If no success point, start from the newest scanned message
+            offset = max(self.scanned_message_ids)
+            LOGGER.info(f"[cleech] Resuming from last scanned: message ID {offset}")
+        
         message_iterator = user.get_chat_history(
             self.channel_id,
-            offset_id=self.resume_from_msg_id or 0
+            offset_id=offset
         )
+        
         current_batch = []
+        skip_count = 0  # Track how many we're skipping for logging
+        
         try:
             async for message in message_iterator:
+                # Keep the safety check but add logging to see what's happening
                 if message.id in self.scanned_message_ids:
+                    skip_count += 1
+                    if skip_count % 100 == 0:  # Log every 100 skips
+                        LOGGER.info(f"[cleech] Skipped {skip_count} already-scanned messages...")
                     continue
+                
                 if self.is_cancelled:
                     break
+                
+                # Reset skip counter when we find new messages
+                if skip_count > 0:
+                    LOGGER.info(f"[cleech] Finished skipping {skip_count} messages, processing new ones")
+                    skip_count = 0
+                
                 processed_messages += 1
                 current_batch.append(message)
                 self.scanned_message_ids.add(message.id)
+                
                 if len(current_batch) >= batch_size:
                     batch_skipped = await self._process_batch(current_batch, scanner, processed_messages)
                     skipped_duplicates += batch_skipped
                     current_batch = []
                     await asyncio.sleep(batch_sleep)
                     await self._save_progress()
+            
             if current_batch and not self.is_cancelled:
                 batch_skipped = await self._process_batch(current_batch, scanner, processed_messages)
                 skipped_duplicates += batch_skipped
                 await self._save_progress()
+            
             await self._wait_for_completion()
             await self._show_final_results(processed_messages, skipped_duplicates)
+        
         except Exception as e:
             LOGGER.error(f"[cleech] Processing error: {e}")
             await self._save_progress(interrupted=True)
             raise
+
 
     async def _process_batch(self, message_batch, scanner, processed_so_far):
         batch_skipped = 0
