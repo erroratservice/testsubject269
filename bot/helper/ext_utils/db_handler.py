@@ -275,9 +275,9 @@ class DbManager:
             query = {}
             if channel_id:
                 query["channel_id"] = str(channel_id)
-                
+
             total_files = await self._db.file_catalog.count_documents(query)
-            
+
             if channel_id:
                 return {"channel_id": channel_id, "total_files": total_files}
             else:
@@ -287,156 +287,44 @@ class DbManager:
                 ]
                 channel_stats = await self._db.file_catalog.aggregate(pipeline).to_list(None)
                 return {"total_files": total_files, "by_channel": channel_stats}
-                
+
         except PyMongoError as e:
             LOGGER.error(f"Error getting catalog stats: {e}")
             return {}
 
-    # NEW: Failed file tracking methods
-    async def add_failed_file_entry(self, channel_id, message_id, file_data, failure_reason="incomplete_download"):
-        """Add failed file entry to track download failures"""
-        if self._return:
-            return
+    # --- PATCH: Channel Leech Progress Persistence ---
+    async def save_leech_progress(self, user_id, channel_id, data):
+        """Save channel leech scan/download progress for user/channel."""
         try:
-            document = {
-                "channel_id": str(channel_id),
-                "message_id": message_id,
-                "file_unique_id": file_data.get("file_unique_id"),
-                "file_name": file_data.get("file_name"),
-                "caption_first_line": file_data.get("caption_first_line", ""),
-                "expected_size": file_data.get("file_size", 0),
-                "actual_size": file_data.get("actual_size", 0),
-                "failure_reason": failure_reason,
-                "failed_at": datetime.utcnow(),
-                "retry_count": 0,
-                "file_hash": file_data.get("file_hash"),
-                "search_text": file_data.get("search_text", "")
-            }
-            await self._db.failed_files.insert_one(document)
-            LOGGER.info(f"Added failed file entry: {file_data.get('file_name')} - {failure_reason}")
-        except PyMongoError as e:
-            LOGGER.error(f"Error adding failed file entry: {e}")
+            key = f"leech_progress:{user_id}:{channel_id}"
+            await self._db.leech_progress.update_one({"_id": key}, {"$set": dict(data, _id=key)}, upsert=True)
+        except Exception as e:
+            LOGGER.error(f"Error saving leech progress: {e}")
 
-    async def check_failed_file_exists(self, file_unique_id):
-        """Check if file has failed before"""
-        if self._return:
-            return False
+    async def get_leech_progress(self, user_id, channel_id):
+        """Retrieve saved channel leech progress for user/channel."""
         try:
-            result = await self._db.failed_files.find_one({"file_unique_id": file_unique_id})
-            return result is not None
-        except PyMongoError as e:
-            LOGGER.error(f"Error checking failed file: {e}")
-            return False
-
-    async def get_failed_file_info(self, file_unique_id):
-        """Get failed file information"""
-        if self._return:
-            return None
-        try:
-            result = await self._db.failed_files.find_one({"file_unique_id": file_unique_id})
-            return result
-        except PyMongoError as e:
-            LOGGER.error(f"Error getting failed file info: {e}")
+            key = f"leech_progress:{user_id}:{channel_id}"
+            doc = await self._db.leech_progress.find_one({"_id": key})
+            return doc
+        except Exception as e:
+            LOGGER.error(f"Error getting leech progress: {e}")
             return None
 
-    async def update_failed_file_retry(self, file_unique_id):
-        """Update retry count for failed file"""
-        if self._return:
-            return
+    async def clear_leech_progress(self, user_id, channel_id):
+        """Delete saved channel leech progress for user/channel."""
         try:
-            await self._db.failed_files.update_one(
-                {"file_unique_id": file_unique_id}, 
-                {
-                    "$inc": {"retry_count": 1}, 
-                    "$set": {"last_retry": datetime.utcnow()}
-                }
-            )
-            LOGGER.info(f"Updated retry count for failed file: {file_unique_id}")
-        except PyMongoError as e:
-            LOGGER.error(f"Error updating failed file retry: {e}")
+            key = f"leech_progress:{user_id}:{channel_id}"
+            await self._db.leech_progress.delete_one({"_id": key})
+        except Exception as e:
+            LOGGER.error(f"Error clearing leech progress: {e}")
 
-    async def get_failed_files_for_retry(self, channel_id, max_retries=3):
-        """Get failed files that can be retried"""
-        if self._return:
-            return []
-        try:
-            cursor = self._db.failed_files.find({
-                "channel_id": str(channel_id),
-                "retry_count": {"$lt": max_retries}
-            })
-            
-            failed_files = []
-            async for doc in cursor:
-                failed_files.append(doc)
-            
-            return failed_files
-        except PyMongoError as e:
-            LOGGER.error(f"Error getting failed files for retry: {e}")
-            return []
+    @property
+    def _return(self):  # Compatibility stub for existing code
+        return self.__dict__.get("__return", False)
 
-    async def remove_failed_file_entry(self, file_unique_id):
-        """Remove failed file entry (when successfully completed)"""
-        if self._return:
-            return
-        try:
-            result = await self._db.failed_files.delete_one({"file_unique_id": file_unique_id})
-            if result.deleted_count > 0:
-                LOGGER.info(f"Removed failed file entry: {file_unique_id}")
-        except PyMongoError as e:
-            LOGGER.error(f"Error removing failed file entry: {e}")
-
-    async def get_failed_files_stats(self, channel_id=None):
-        """Get failed files statistics"""
-        if self._return:
-            return {}
-        try:
-            query = {}
-            if channel_id:
-                query["channel_id"] = str(channel_id)
-                
-            total_failed = await self._db.failed_files.count_documents(query)
-            
-            pipeline = [
-                {"$match": query},
-                {"$group": {"_id": "$failure_reason", "count": {"$sum": 1}}},
-                {"$sort": {"count": -1}}
-            ]
-            failure_reasons = await self._db.failed_files.aggregate(pipeline).to_list(None)
-            
-            retry_pipeline = [
-                {"$match": query},
-                {"$group": {"_id": "$retry_count", "count": {"$sum": 1}}},
-                {"$sort": {"_id": 1}}
-            ]
-            retry_stats = await self._db.failed_files.aggregate(retry_pipeline).to_list(None)
-            
-            return {
-                "total_failed": total_failed,
-                "by_failure_reason": failure_reasons,
-                "by_retry_count": retry_stats
-            }
-                
-        except PyMongoError as e:
-            LOGGER.error(f"Error getting failed files stats: {e}")
-            return {}
-
-    async def mark_failed_as_permanent(self, file_unique_id, reason="max_retries_exceeded"):
-        """Mark a failed file as permanently failed (won't retry)"""
-        if self._return:
-            return
-        try:
-            await self._db.failed_files.update_one(
-                {"file_unique_id": file_unique_id},
-                {
-                    "$set": {
-                        "permanent_failure": True,
-                        "permanent_failure_reason": reason,
-                        "marked_permanent_at": datetime.utcnow()
-                    }
-                }
-            )
-            LOGGER.info(f"Marked file as permanently failed: {file_unique_id} - {reason}")
-        except PyMongoError as e:
-            LOGGER.error(f"Error marking file as permanently failed: {e}")
+    @_return.setter
+    def _return(self, v):
+        self.__dict__["__return"] = v
 
 database = DbManager()
