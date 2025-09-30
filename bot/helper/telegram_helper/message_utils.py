@@ -7,6 +7,11 @@ from bot import config_dict, LOGGER, status_dict, task_dict_lock, intervals, bot
 from ..ext_utils.bot_utils import SetInterval
 from ..ext_utils.exceptions import TgLinkException
 from ..ext_utils.status_utils import get_readable_message
+import pyrogram.utils as pyroutils
+
+# Fix for new Telegram peer ID formats
+pyroutils.MIN_CHAT_ID = -999999999999
+pyroutils.MIN_CHANNEL_ID = -100999999999999
 
 
 async def send_message(message, text, buttons=None, block=True):
