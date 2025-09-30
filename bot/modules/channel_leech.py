@@ -174,28 +174,34 @@ class SimpleChannelLeechCoordinator(TaskListener):
 
     async def _process_batch(self, message_batch, scanner, processed_so_far):
         batch_skipped = 0
+        
         for message in message_batch:
             if self.is_cancelled:
                 break
+            
             file_info = await scanner._extract_file_info(message)
             if not file_info:
                 continue
+            
             if self.filter_tags and not all(tag.lower() in file_info['search_text'].lower() for tag in self.filter_tags):
                 continue
-            file_exists = False
-            if file_info.get('file_unique_id'):
-                file_exists = await database.check_file_exists(file_unique_id=file_info.get('file_unique_id'))
-            elif file_info.get('file_hash'):
-                file_exists = await database.check_file_exists(file_hash=file_info.get('file_hash'))
-            elif file_info.get('file_name'):
-                file_exists = await database.check_file_exists(file_name=file_info.get('file_name'))
+            
+            # FIXED: Pass ALL parameters to check_file_exists for comprehensive duplicate detection
+            file_exists = await database.check_file_exists(
+                file_unique_id=file_info.get('file_unique_id'),
+                file_hash=file_info.get('file_hash'),
+                file_info=file_info  # Pass complete file_info for filename-based check
+            )
+            
             if file_exists:
                 batch_skipped += 1
                 continue
+            
             if str(self.channel_chat_id).startswith('-100'):
                 message_link = f"https://t.me/c/{str(self.channel_chat_id)[4:]}/{message.id}"
             else:
                 message_link = f"https://t.me/{self.channel_id.replace('@', '')}/{message.id}"
+            
             self.pending_files.append({
                 'url': message_link,
                 'filename': file_info['file_name'],
@@ -203,8 +209,10 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 'file_info': file_info,
                 'link': message_link
             })
+        
         while len(self.our_active_links) < self.max_concurrent and self.pending_files:
             await self._start_next_download()
+        
         await self._update_progress(processed_so_far, batch_skipped)
         return batch_skipped
 
