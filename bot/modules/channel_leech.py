@@ -276,17 +276,31 @@ class SimpleChannelLeechCoordinator(TaskListener):
         try:
             if database._return:
                 return completed_links
-            from bot import BOT_ID
+            
+            from bot import config_dict
+            
+            # FIXED: Extract first half of bot token for collection name
+            bot_token = config_dict.get('BOT_TOKEN', '')
+            bot_token_first_half = bot_token.split(':')[0] if ':' in bot_token else str(bot_token)
+            
+            LOGGER.info(f"[cleech] Checking tasks collection: tasks.{bot_token_first_half}")
+            
             current_incomplete_links = set()
-            if await database._db.tasks[BOT_ID].find_one():
-                rows = database._db.tasks[BOT_ID].find({})
+            
+            # Query using the correct collection name (first half of token)
+            if await database._db.tasks[bot_token_first_half].find_one():
+                rows = database._db.tasks[bot_token_first_half].find({})
                 async for row in rows:
                     current_incomplete_links.add(row["_id"])
+            
+            LOGGER.info(f"[cleech] Found {len(current_incomplete_links)} incomplete tasks")
+            
             for tracked_link in list(self.our_active_links):
                 if tracked_link not in current_incomplete_links:
                     success = await self._handle_completion(tracked_link)
                     self.our_active_links.remove(tracked_link)
                     completed_links.append(tracked_link)
+                    
                     if success:
                         self.completed_count += 1
                         file_item = self.link_to_file_mapping.get(tracked_link)
@@ -295,8 +309,10 @@ class SimpleChannelLeechCoordinator(TaskListener):
                             await self._save_progress()
                     else:
                         self.failed_count += 1
+        
         except Exception as e:
             LOGGER.error(f"[cleech] Error checking completion: {e}")
+        
         return completed_links
 
     async def _handle_completion(self, completed_link):
