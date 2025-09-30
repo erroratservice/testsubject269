@@ -111,17 +111,17 @@ class ChannelScanner:
         if self.filter_tags:
             if not any(tag.lower() in file_info['search_text'].lower() for tag in self.filter_tags):
                 return
-
-        # Check if already exists in database
+        
+        # Check if already exists in database - FIXED
         exists = await database.check_file_exists(
-            file_info.get('file_unique_id'),
-            file_info.get('file_hash'),
-            file_info.get('file_name')
+            file_unique_id=file_info.get('file_unique_id'),
+            file_hash=file_info.get('file_hash'),
+            file_info=file_info  # ✓ Pass the entire dict, not just file_name
         )
-
+        
         if exists:
             return
-
+        
         # Add to database
         try:
             await database.add_file_entry(
