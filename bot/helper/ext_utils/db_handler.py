@@ -275,6 +275,27 @@ class DbManager:
             return
         await self._db[name][BOT_ID].drop()
 
+    # Existing file catalog methods
+    async def add_file_entry(self, channel_id, message_id, file_data):
+        """Add file entry to catalog"""
+        try:
+            document = {
+                "channel_id": str(channel_id),
+                "message_id": message_id,
+                "file_unique_id": file_data.get("file_unique_id"),
+                "file_name": file_data.get("file_name"),
+                "caption_first_line": file_data.get("caption_first_line", ""),
+                "file_size": file_data.get("file_size", 0),
+                "mime_type": file_data.get("mime_type", ""),
+                "file_hash": file_data.get("file_hash"),
+                "search_text": file_data.get("search_text", ""),
+                "date_added": file_data.get("date"),
+                "indexed_at": datetime.utcnow()
+            }
+            await self._db.file_catalog.insert_one(document)
+        except PyMongoError as e:
+            LOGGER.error(f"Error adding file entry: {e}")    
+
     # --- Only this function is patched for duplicate check by sanitized name ---
     async def check_file_exists(self, file_unique_id=None, file_hash=None, file_info=None):
         """Check if file exists in catalog using sanitized base name (caption first line preferred)."""
