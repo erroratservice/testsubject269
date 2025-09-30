@@ -128,6 +128,8 @@ async def get_tg_link_message(link):
 
     chat = msg[1]
     msg_id = msg[2]
+    
+    # Handle message ranges
     if "-" in msg_id:
         start_id, end_id = msg_id.split("-")
         msg_id = start_id = int(start_id)
@@ -151,7 +153,38 @@ async def get_tg_link_message(link):
     if chat.isdigit():
         chat = int(chat) if private else int(f"-100{chat}")
 
-    if not private:
+    # For channels with forwarding restrictions, skip bot attempt and use user session directly
+    if not private and user:
+        try:
+            # First try to resolve the peer with user session to check if channel has restrictions
+            peer = await user.resolve_peer(chat)
+            channel_info = await user.get_chat(chat)
+            
+            # Check if channel has forwarding restrictions
+            if hasattr(channel_info, 'noforwards') and channel_info.noforwards:
+                LOGGER.info(f"Channel {chat} has forwarding restrictions, using user session")
+                private = True
+            else:
+                # Try bot first for unrestricted channels
+                try:
+                    message = await bot.get_messages(chat_id=chat, message_ids=msg_id)
+                    if message.empty:
+                        private = True
+                except Exception as e:
+                    LOGGER.warning(f"Bot access failed for {chat}: {e}")
+                    private = True
+        except Exception as e:
+            LOGGER.warning(f"User session peer resolution failed for {chat}: {e}")
+            # Fall back to original logic
+            try:
+                message = await bot.get_messages(chat_id=chat, message_ids=msg_id)
+                if message.empty:
+                    private = True
+            except Exception as e:
+                private = True
+                if not user:
+                    raise e
+    elif not private:
         try:
             message = await bot.get_messages(chat_id=chat, message_ids=msg_id)
             if message.empty:
@@ -165,15 +198,18 @@ async def get_tg_link_message(link):
         return (links, "bot") if links else (message, "bot")
     elif user:
         try:
+            # Ensure peer is resolved before accessing messages
+            await user.resolve_peer(chat)
             user_message = await user.get_messages(chat_id=chat, message_ids=msg_id)
         except Exception as e:
             raise TgLinkException(
-                f"You don't have access to this chat!. ERROR: {e}"
+                f"Cannot access this channel. It may have forwarding restrictions or you don't have access. ERROR: {e}"
             ) from e
         if not user_message.empty:
             return (links, "user") if links else (user_message, "user")
     else:
-        raise TgLinkException("Private: Please report!")
+        raise TgLinkException("USER_SESSION_STRING required for protected channels!")
+
 
 
 async def update_status_message(sid, force=False):
