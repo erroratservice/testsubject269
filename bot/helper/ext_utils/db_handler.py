@@ -61,6 +61,8 @@ def get_duplicate_check_name(file_info):
     base_name = os.path.splitext(sanitized)[0].lower()
     return base_name
 
+COMMON_EXTENSIONS = [".mp4", ".mkv"]
+
 class DbManager:
     def __init__(self):
         self._return = False
@@ -275,7 +277,6 @@ class DbManager:
             return
         await self._db[name][BOT_ID].drop()
 
-    # Existing file catalog methods
     async def add_file_entry(self, channel_id, message_id, file_data):
         """Add file entry to catalog"""
         try:
@@ -294,26 +295,34 @@ class DbManager:
             }
             await self._db.file_catalog.insert_one(document)
         except PyMongoError as e:
-            LOGGER.error(f"Error adding file entry: {e}")    
+            LOGGER.error(f"Error adding file entry: {e}")
 
-    # --- Only this function is patched for duplicate check by sanitized name ---
     async def check_file_exists(self, file_unique_id=None, file_hash=None, file_info=None):
-        """Check if file exists in catalog using sanitized base name (caption first line preferred)."""
+        """
+        Check if file exists in catalog using sanitized base name + common extensions.
+        Prefer caption_first_line, fallback to file_name field.
+        """
         try:
-            query = {}
+            # Check by unique_id or file_hash if possible
             if file_unique_id:
-                query["file_unique_id"] = file_unique_id
-            elif file_hash:
-                query["file_hash"] = file_hash
-            elif file_info:
+                result = await self._db.file_catalog.find_one({"file_unique_id": file_unique_id})
+                if result:
+                    return True
+            if file_hash:
+                result = await self._db.file_catalog.find_one({"file_hash": file_hash})
+                if result:
+                    return True
+            # Otherwise, do extension brute-force
+            if file_info:
                 base_name = get_duplicate_check_name(file_info)
-                # Case-insensitive regex match for file_name in DB (without extension)
-                regex = re.compile(f"^{re.escape(base_name)}(\\.[^.]*)?$", re.IGNORECASE)
-                query["file_name"] = regex
-            else:
-                return False
-            result = await self._db.file_catalog.find_one(query)
-            return result is not None
+                for ext in COMMON_EXTENSIONS:
+                    for field in ("caption_first_line", "file_name"):
+                        value = base_name + ext
+                        query = {field: value}
+                        result = await self._db.file_catalog.find_one(query)
+                        if result:
+                            return True
+            return False
         except PyMongoError as e:
             LOGGER.error(f"Error checking file exists: {e}")
             return False
