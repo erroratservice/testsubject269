@@ -1,7 +1,7 @@
 from pyrogram.filters import command
 from pyrogram.handlers import MessageHandler
 from pyrogram.errors import FloodWait
-from bot import bot, user, LOGGER
+from bot import bot, user, LOGGER, config_dict
 from ..helper.ext_utils.bot_utils import new_task
 from ..helper.ext_utils.db_handler import database
 from ..helper.telegram_helper.message_utils import send_message, edit_message
