@@ -32,6 +32,7 @@ def sanitize_filename(filename):
     )
     filename = emoji_pattern.sub('', filename)
     filename = filename.replace('+', '.')
+    filename = filename.replace('_', '.')
     filename = filename.replace(' ', '.')
     filename = re.sub(r'[\[\]\(\)\{\}]', '', filename)
     filename = re.sub(r'[<>:"/\\|?*]', '', filename)
