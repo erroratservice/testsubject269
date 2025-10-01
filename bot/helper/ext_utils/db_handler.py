@@ -39,7 +39,7 @@ def sanitize_filename(filename):
     
     # Remove emojis
     filename = emoji_pattern.sub('', filename)
-    # Replace special chars with dots
+    filename = filename.replace('_', '.')
     filename = filename.replace('+', '.')
     filename = filename.replace(' ', '.')
     # Remove brackets and invalid chars
