@@ -266,7 +266,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
         await edit_message(self.status_message, f"**Starting Channel Leech...**")
         scanner = ChannelScanner(user, self.channel_id, filter_tags=self.filter_tags)
         batch_size = 30
-        batch_sleep = 2
+        batch_sleep = 1
         processed_messages = 0
         skipped_duplicates = 0
         completion_task_started = False
