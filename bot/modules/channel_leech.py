@@ -364,6 +364,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
 
                 for tracked_link in list(self.our_active_links):
                     if tracked_link not in current_incomplete_links:
+                        # This is the line where the typo likely is in your running code
                         success = await self._handle_completion(tracked_link)
                         self.our_active_links.remove(tracked_link)
                         completed_links.append(tracked_link)
@@ -376,11 +377,11 @@ class SimpleChannelLeechCoordinator(TaskListener):
                                 await self._save_progress()
                         else:
                             self.failed_count += 1
-                return completed_links
+                return completed_links  # Exit after successful check
             except Exception as e:
                 LOGGER.error(f"[cleech] Error checking completion (attempt {i + 1}/{retries}): {e}")
                 if i < retries - 1:
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(5)  # Wait before retrying
                 else:
                     LOGGER.error(f"[cleech] All retries failed. Completion check will be attempted again later.")
         return completed_links
