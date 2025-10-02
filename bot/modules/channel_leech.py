@@ -44,49 +44,65 @@ def sanitize_filename(filename):
     return filename
 
 class DestinationWatcher:
-    """Monitors the leech destination for new files to verify completion."""
+    """
+    Monitors the leech destination for new files using active polling,
+    inspired by the robust fetching method in indexfiles.py.
+    """
     def __init__(self, client_session, destination_id, start_time):
         self.client = client_session
         self.destination_id = destination_id
         self.start_time = start_time
         self.verified_files = set()
-        filters = (document | video) & chat(self.destination_id)
-        self.handler = MessageHandler(self._on_new_message, filters=filters)
         self._is_active = False
+        self._task = None
 
-    async def _on_new_message(self, client, message: Message):
-        """Callback for new document or video messages."""
-        if message.date < self.start_time:
-            return
-
-        sanitized_name = None
-        if message.caption:
-            caption_first_line = message.caption.split('\n')[0].strip()
-            sanitized_name = sanitize_filename(caption_first_line)
-        
-        if not sanitized_name:
-            file_name = getattr(message.document or message.video, 'file_name', None)
-            if file_name:
-                sanitized_name = sanitize_filename(file_name)
-
-        if sanitized_name:
-            LOGGER.info(f"[Watcher] Detected new file in destination: {sanitized_name}")
-            self.verified_files.add(sanitized_name)
+    async def _monitor_destination(self):
+        """Periodically fetches the latest messages to find new files."""
+        while self._is_active:
+            try:
+                # Fetch last 20 messages. In a high-traffic scenario, this can be increased.
+                async for message in self.client.get_chat_history(self.destination_id, limit=20):
+                    if not message or message.date < self.start_time:
+                        # Stop checking once we see messages older than our start time
+                        break
+                    
+                    sanitized_name = None
+                    # --- Logic to get sanitized name, prioritizing caption ---
+                    if message.caption:
+                        caption_first_line = message.caption.split('\n')[0].strip()
+                        sanitized_name = sanitize_filename(caption_first_line)
+                    
+                    if not sanitized_name:
+                        file_name = getattr(message.document or message.video, 'file_name', None)
+                        if file_name:
+                            sanitized_name = sanitize_filename(file_name)
+                    # --- End of logic ---
+                    
+                    if sanitized_name and sanitized_name not in self.verified_files:
+                        LOGGER.info(f"[Watcher] Detected new file in destination: {sanitized_name}")
+                        self.verified_files.add(sanitized_name)
+                        
+            except Exception as e:
+                LOGGER.error(f"[Watcher] Error while polling destination {self.destination_id}: {e}")
+            
+            # Wait before the next poll
+            await asyncio.sleep(10)
 
     def start(self):
-        """Starts the watcher on the specified client session."""
+        """Starts the watcher's background polling task."""
         if not self._is_active:
-            self.client.add_handler(self.handler)
             self._is_active = True
+            self._task = asyncio.create_task(self._monitor_destination())
             session_name = "BOT" if hasattr(self.client, 'me') and self.client.me.is_bot else "USER"
-            LOGGER.info(f"[Watcher] Started monitoring destination chat {self.destination_id} using {session_name} session.")
+            LOGGER.info(f"[Watcher] Started actively polling destination {self.destination_id} using {session_name} session.")
 
     def stop(self):
-        """Stops the watcher."""
+        """Stops the watcher's background task."""
         if self._is_active:
-            self.client.remove_handler(self.handler)
             self._is_active = False
-            LOGGER.info(f"[Watcher] Stopped monitoring destination chat: {self.destination_id}")
+            if self._task:
+                self._task.cancel()
+            LOGGER.info(f"[Watcher] Stopped polling destination: {self.destination_id}")
 
     def is_verified(self, sanitized_name):
         return sanitized_name in self.verified_files
