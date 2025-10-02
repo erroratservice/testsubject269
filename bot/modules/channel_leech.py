@@ -267,22 +267,25 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 completion_task = asyncio.create_task(self._wait_for_completion())
                 completion_task_started = True
 
+        # Resume logic setup
         offset_id = 0
         if self.resume_from_msg_id:
             offset_id = self.resume_from_msg_id
             LOGGER.info(f"[cleech] Resuming scan from message ID: {offset_id}")
         
-        # --- HYBRID APPROACH: CHRONOLOGICAL + MEDIA FILTERING ---
+        # --- BATCH PROCESSING WITH CHRONOLOGICAL ORDER ---
         current_batch = []
         skip_count = 0
-
+        
         try:
-            # Use get_chat_history for chronological order, but filter for media only
+            LOGGER.info(f"[cleech] Starting batch processing (30 media files per batch)...")
+            
+            # Use get_chat_history for true chronological order
             message_iterator = user.get_chat_history(
                 chat_id=self.channel_id,
                 offset_id=offset_id
             )
-
+            
             async for message in message_iterator:
                 if message.id in self.scanned_message_ids:
                     skip_count += 1
@@ -293,7 +296,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 if self.is_cancelled:
                     break
                     
-                # FILTER: Only process messages with media (documents, videos, photos)
+                # IMMEDIATE FILTER: Skip non-media messages instantly (no processing overhead)
                 if not (message.document or message.video):
                     continue
                     
@@ -310,15 +313,18 @@ class SimpleChannelLeechCoordinator(TaskListener):
                     completion_task = asyncio.create_task(self._wait_for_completion())
                     completion_task_started = True
                     
+                # PROCESS BATCH when we have 30 media files
                 if len(current_batch) >= batch_size:
+                    LOGGER.info(f"[cleech] Processing batch of {len(current_batch)} media files...")
                     batch_skipped = await self._process_batch(current_batch, scanner, processed_messages)
                     skipped_duplicates += batch_skipped
                     current_batch = []
                     await asyncio.sleep(batch_sleep)
                     await self._save_progress()
                     
-            # Process remaining batch
+            # Process remaining batch if any files left
             if current_batch and not self.is_cancelled:
+                LOGGER.info(f"[cleech] Processing final batch of {len(current_batch)} media files...")
                 batch_skipped = await self._process_batch(current_batch, scanner, processed_messages)
                 skipped_duplicates += batch_skipped
                 await self._save_progress()
