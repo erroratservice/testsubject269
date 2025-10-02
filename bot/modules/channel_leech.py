@@ -89,20 +89,31 @@ class SimpleChannelLeechCoordinator(TaskListener):
             await send_message(self.message, "User session required!")
             return
 
+        # --- CORRECTED RESUME LOGIC WITH DEBUGGING ---
         progress = await database.get_leech_progress(self.message.from_user.id, self.channel_id)
         if progress:
             self.resume_mode = True
             self.scanned_message_ids = set(progress.get("scanned_message_ids", []))
-            self.resume_from_msg_id = progress.get("last_success_msg_id")
-            if self.resume_from_msg_id is None and self.scanned_message_ids:
-                self.resume_from_msg_id = max(self.scanned_message_ids)
-            if self.resume_from_msg_id is not None:
+            
+            # Minimal Debugging: Log what the database returns
+            db_resume_id = progress.get("last_success_msg_id")
+            LOGGER.info(f"[cleech_debug] Value of 'last_success_msg_id' from database: {db_resume_id}")
+
+            # FIX: Only set resume_from_msg_id if it's a valid ID from the database. Do not fall back to max().
+            if db_resume_id and isinstance(db_resume_id, int):
+                self.resume_from_msg_id = db_resume_id
                 await send_message(self.message, f"⏸️ Resuming previous channel leech from message {self.resume_from_msg_id}.")
             else:
-                await send_message(self.message, "⏸️ Resuming previous channel leech from the beginning (no resume point found).")
+                # If there's no valid last success ID, it's safer to start fresh from the newest message.
+                self.resume_from_msg_id = 0 # Setting to 0 will start from the latest message.
+                await send_message(self.message, "⚠️ Could not find a valid resume point. Starting scan from the newest message.")
+            
+            LOGGER.info(f"[cleech_debug] Final 'resume_from_msg_id' to be used: {self.resume_from_msg_id}")
+
         else:
             self.scanned_message_ids = set()
             self.resume_from_msg_id = None
+        # --- END OF CORRECTION ---
 
         try:
             chat = await user.get_chat(self.channel_id)
