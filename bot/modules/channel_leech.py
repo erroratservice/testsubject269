@@ -275,7 +275,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
         media_filters = [
             enums.MessagesFilter.DOCUMENT,
             enums.MessagesFilter.VIDEO,
-            enums.MessagesFilter.PHOTO_VIDEO
         ]
         
         current_batch = []
