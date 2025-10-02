@@ -266,7 +266,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
         await edit_message(self.status_message, f"**Starting Channel Leech...**")
         scanner = ChannelScanner(user, self.channel_id, filter_tags=self.filter_tags)
         batch_size = 30
-        batch_sleep = 1
+        batch_sleep = 2
         processed_messages = 0
         skipped_duplicates = 0
         completion_task_started = False
@@ -287,7 +287,17 @@ class SimpleChannelLeechCoordinator(TaskListener):
             offset_id = self.resume_from_msg_id
             LOGGER.info(f"[cleech] Resuming scan from message ID: {offset_id}")
         
-        message_iterator = user.get_chat_history(self.channel_id, offset_id=offset_id)
+        # --- EFFICIENT SCANNING LOGIC ---
+        from pyrogram.enums import MessagesFilter
+
+        # This tells Pyrogram to only fetch messages that are documents OR videos
+        message_iterator = user.search_messages(
+            chat_id=self.channel_id,
+            offset=offset_id, # In search_messages, offset is the starting message_id
+            filter=MessagesFilter.DOCUMENT | MessagesFilter.VIDEO
+        )
+        # --- END OF EFFICIENCY LOGIC ---
+
         current_batch = []
         skip_count = 0
 
@@ -296,12 +306,12 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 if message.id in self.scanned_message_ids:
                     skip_count += 1
                     if skip_count % 100 == 0:
-                        LOGGER.info(f"[cleech] Skipped {skip_count} already-scanned messages...")
+                        LOGGER.info(f"[cleech] Skipped {skip_count} already-scanned media messages...")
                     continue
                 if self.is_cancelled:
                     break
                 if skip_count > 0:
-                    LOGGER.info(f"[cleech] Finished skipping {skip_count} messages, processing new ones")
+                    LOGGER.info(f"[cleech] Finished skipping {skip_count} media messages, processing new ones")
                     skip_count = 0
                 processed_messages += 1
                 current_batch.append(message)
