@@ -1,7 +1,7 @@
-from pyrogram.filters import command, chat
+from pyrogram.filters import command, chat, document, video
 from pyrogram.handlers import MessageHandler, RawUpdateHandler
 from pyrogram.errors import FloodWait, UserNotParticipant
-from pyrogram.types import Message # MessageService is removed
+from pyrogram.types import Message
 from bot import bot, user, LOGGER, config_dict, user_data
 from ..helper.ext_utils.bot_utils import new_task
 from ..helper.ext_utils.db_handler import database
@@ -50,29 +50,22 @@ class DestinationWatcher:
         self.destination_id = destination_id
         self.start_time = start_time
         self.verified_files = set()
-        self.handler = RawUpdateHandler(self._on_new_message)
+        # Use a specific MessageHandler for reliability
+        filters = (document | video) & chat(self.destination_id)
+        self.handler = MessageHandler(self._on_new_message, filters=filters)
         self._is_active = False
 
-    async def _on_new_message(self, client, update, users, chats):
-        """Callback for new messages that safely handles all update types."""
-        message = getattr(update, 'message', None)
-        # Safely ignore anything that is not a message with a chat attribute
-        if (message is None or not hasattr(message, 'chat') or message.chat is None):
-            return
-
-        if (message.chat.id != self.destination_id or
-            message.date < self.start_time):
+    async def _on_new_message(self, client, message: Message):
+        """Callback for new document or video messages."""
+        if message.date < self.start_time:
             return
 
         sanitized_name = None
-        caption = getattr(message, 'caption', '')
-        if caption:
-            sanitized_name = sanitize_filename(caption.split('\n')[0].strip())
-        elif message.document and hasattr(message.document, 'file_name'):
-            sanitized_name = sanitize_filename(message.document.file_name)
-        elif message.video and hasattr(message.video, 'file_name'):
-             sanitized_name = sanitize_filename(message.video.file_name)
+        file_name = getattr(message.document or message.video, 'file_name', None)
 
+        if file_name:
+            sanitized_name = sanitize_filename(file_name)
+        
         if sanitized_name:
             LOGGER.info(f"[Watcher] Detected new file in destination: {sanitized_name}")
             self.verified_files.add(sanitized_name)
