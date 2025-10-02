@@ -428,7 +428,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
         try:
             COMMAND_CHANNEL_ID = -1001791052293 # This should ideally be a config variable
             clean_name = self._generate_clean_filename(file_item['file_info'], file_item['message_id'])
-            leech_cmd = f'/leech {file_item["url"]} -n "{clean_name}"' # Quoted filename
+            leech_cmd = f'/leech {file_item["url"]} -n {clean_name}'
             command_message = await user.send_message(chat_id=COMMAND_CHANNEL_ID, text=leech_cmd)
             command_msg_id = command_message.id
             actual_stored_url = f"https://t.me/c/{str(COMMAND_CHANNEL_ID)[4:]}/{command_msg_id}"
