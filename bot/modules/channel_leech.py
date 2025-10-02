@@ -352,63 +352,52 @@ class SimpleChannelLeechCoordinator(TaskListener):
 
     async def _check_completed(self):
         completed_links = []
-        try:
-            if database._return:
-                return completed_links
-            
-            from bot import config_dict
-            
-            # FIXED: Extract first half of bot token for collection name
-            bot_token = config_dict.get('BOT_TOKEN', '')
-            bot_token_first_half = bot_token.split(':')[0] if ':' in bot_token else str(bot_token)
-            
-            LOGGER.info(f"[cleech] Checking tasks collection: tasks.{bot_token_first_half}")
-            
-            current_incomplete_links = set()
-            
-            # Query using the correct collection name (first half of token)
-            if await database._db.tasks[bot_token_first_half].find_one():
-                rows = database._db.tasks[bot_token_first_half].find({})
-                async for row in rows:
-                    current_incomplete_links.add(row["_id"])
-            
-            LOGGER.info(f"[cleech] Found {len(current_incomplete_links)} incomplete tasks")
-            
-            for tracked_link in list(self.our_active_links):
-                if tracked_link not in current_incomplete_links:
-                    success = await self._handle_completion(tracked_link)
-                    self.our_active_links.remove(tracked_link)
-                    completed_links.append(tracked_link)
-                    
-                    if success:
-                        self.completed_count += 1
-                        file_item = self.link_to_file_mapping.get(tracked_link)
-                        if file_item:
-                            self.last_success_msg_id = file_item["message_id"]
-                            await self._save_progress()
-                    else:
-                        self.failed_count += 1
-        
-        except Exception as e:
-            LOGGER.error(f"[cleech] Error checking completion: {e}")
-        
-        return completed_links
+        retries = 3
+        for i in range(retries):
+            try:
+                if database._return:
+                    return completed_links
 
-    async def _handle_completion(self, completed_link):
-        try:
-            if completed_link not in self.link_to_file_mapping:
-                return False
-            file_item = self.link_to_file_mapping[completed_link]
-            await database.add_file_entry(
-                self.channel_chat_id,
-                file_item['message_id'],
-                file_item['file_info']
-            )
-            del self.link_to_file_mapping[completed_link]
-            return True
-        except Exception as e:
-            LOGGER.error(f"[cleech] Error handling completion: {e}")
-            return False
+                from bot import config_dict
+
+                # FIXED: Extract first half of bot token for collection name
+                bot_token = config_dict.get('BOT_TOKEN', '')
+                bot_token_first_half = bot_token.split(':')[0] if ':' in bot_token else str(bot_token)
+
+                LOGGER.info(f"[cleech] Checking tasks collection: tasks.{bot_token_first_half}")
+
+                current_incomplete_links = set()
+
+                # Query using the correct collection name (first half of token)
+                if await database._db.tasks[bot_token_first_half].find_one():
+                    rows = database._db.tasks[bot_token_first_half].find({})
+                    async for row in rows:
+                        current_incomplete_links.add(row["_id"])
+
+                LOGGER.info(f"[cleech] Found {len(current_incomplete_links)} incomplete tasks")
+
+                for tracked_link in list(self.our_active_links):
+                    if tracked_link not in current_incomplete_links:
+                        success = await self._handle_completion(tracked_link)
+                        self.our_active_links.remove(tracked_link)
+                        completed_links.append(tracked_link)
+
+                        if success:
+                            self.completed_count += 1
+                            file_item = self.link_to_file_mapping.get(tracked_link)
+                            if file_item:
+                                self.last_success_msg_id = file_item["message_id"]
+                                await self._save_progress()
+                        else:
+                            self.failed_count += 1
+                return completed_links  # Exit after successful check
+            except Exception as e:
+                LOGGER.error(f"[cleech] Error checking completion (attempt {i + 1}/{retries}): {e}")
+                if i < retries - 1:
+                    await asyncio.sleep(5)  # Wait before retrying
+                else:
+                    LOGGER.error(f"[cleech] All retries failed. Completion check will be attempted again later.")
+        return completed_links
 
     async def _save_progress(self, interrupted=False):
         progress = {
