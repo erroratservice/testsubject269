@@ -325,7 +325,8 @@ class SimpleChannelLeechCoordinator(TaskListener):
             leech_cmd = f'/leech {file_item["url"]} -n {clean_name}'
             command_message = await user.send_message(chat_id=COMMAND_CHANNEL_ID, text=leech_cmd)
             command_msg_id = command_message.id
-            actual_stored_url = f"https.t.me/c/{str(COMMAND_CHANNEL_ID)[4:]}/{command_msg_id}"
+            # --- TYPO FIXED IN THIS LINE ---
+            actual_stored_url = f"https://t.me/c/{str(COMMAND_CHANNEL_ID)[4:]}/{command_msg_id}"
             await asyncio.sleep(5)
             self.our_active_links.add(actual_stored_url)
             self.link_to_file_mapping[actual_stored_url] = file_item
