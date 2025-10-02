@@ -118,7 +118,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
         self.resume_from_msg_id = None
         self.scanned_message_ids = set()
         self.last_success_msg_id = None
-        self.start_time = datetime.now(timezone.utc)
+        self.start_time = datetime.now()
         self.watcher = None
         super().__init__()
 
