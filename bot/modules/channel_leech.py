@@ -1,6 +1,7 @@
 from pyrogram.filters import command, chat
 from pyrogram.handlers import MessageHandler, RawUpdateHandler
 from pyrogram.errors import FloodWait, UserNotParticipant
+from pyrogram.types import Message, MessageService
 from bot import bot, user, LOGGER, config_dict, user_data
 from ..helper.ext_utils.bot_utils import new_task
 from ..helper.ext_utils.db_handler import database
@@ -53,10 +54,13 @@ class DestinationWatcher:
         self._is_active = False
 
     async def _on_new_message(self, client, update, users, chats):
-        """Callback for new messages in the destination chat."""
-        message = getattr(update, 'message', None)
-        if (message is None or
-            message.chat.id != self.destination_id or
+        """Callback for new messages that safely handles all update types."""
+        # FIX: Ensure the update is a standard Message and not a service message
+        if not isinstance(getattr(update, 'message', None), Message):
+            return
+
+        message = update.message
+        if (message.chat.id != self.destination_id or
             message.date < self.start_time):
             return
 
@@ -64,9 +68,9 @@ class DestinationWatcher:
         caption = getattr(message, 'caption', '')
         if caption:
             sanitized_name = sanitize_filename(caption.split('\n')[0].strip())
-        elif message.document:
+        elif message.document and hasattr(message.document, 'file_name'):
             sanitized_name = sanitize_filename(message.document.file_name)
-        elif message.video:
+        elif message.video and hasattr(message.video, 'file_name'):
              sanitized_name = sanitize_filename(message.video.file_name)
 
         if sanitized_name:
@@ -224,7 +228,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
     async def _get_leech_destination(self):
         """Determines the correct leech destination chat ID in line with db_handler.py."""
         try:
-            # 1. Check for global LEECH_DUMP_CHAT
             bot_token_first_half = config_dict['BOT_TOKEN'].split(':')[0]
             bot_settings = await database._db.settings.config.find_one({"_id": bot_token_first_half})
             if bot_settings and bot_settings.get('LEECH_DUMP_CHAT'):
@@ -233,7 +236,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
                     LOGGER.info(f"[cleech] Using global LEECH_DUMP_CHAT: {dump_chat_id}")
                     return int(dump_chat_id)
 
-            # 2. Fallback to user-specific leech_dest from the loaded user_data dictionary
             if user:
                 user_session_id = user.me.id
                 data = user_data.get(user_session_id, {})
@@ -401,7 +403,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
         try:
             COMMAND_CHANNEL_ID = -1001791052293
             clean_name = self._generate_clean_filename(file_item['file_info'], file_item['message_id'])
-            leech_cmd = f'/leech {file_item["url"]} -n {clean_name}'
+            leech_cmd = f'/leech {file_item["url"]} -n "{clean_name}"'
             command_message = await user.send_message(chat_id=COMMAND_CHANNEL_ID, text=leech_cmd)
             command_msg_id = command_message.id
             actual_stored_url = f"https://t.me/c/{str(COMMAND_CHANNEL_ID)[4:]}/{command_msg_id}"
