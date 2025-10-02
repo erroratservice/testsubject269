@@ -1,6 +1,6 @@
 from pyrogram.filters import command, chat
 from pyrogram.handlers import MessageHandler, RawUpdateHandler
-from pyrogram.errors import FloodWait
+from pyrogram.errors import FloodWait, UserNotParticipant
 from bot import bot, user, LOGGER, config_dict
 from ..helper.ext_utils.bot_utils import new_task
 from ..helper.ext_utils.db_handler import database
@@ -44,7 +44,8 @@ def sanitize_filename(filename):
 
 class DestinationWatcher:
     """Monitors the leech destination for new files to verify completion."""
-    def __init__(self, destination_id, start_time):
+    def __init__(self, client_session, destination_id, start_time):
+        self.client = client_session
         self.destination_id = destination_id
         self.start_time = start_time
         self.verified_files = set()
@@ -57,12 +58,11 @@ class DestinationWatcher:
         if (message is None or
             message.chat.id != self.destination_id or
             message.date < self.start_time):
-            return # Ignore irrelevant messages
+            return
 
         sanitized_name = None
         caption = getattr(message, 'caption', '')
         if caption:
-            # The sanitized name is typically the first line of the caption
             sanitized_name = sanitize_filename(caption.split('\n')[0].strip())
         elif message.document:
             sanitized_name = sanitize_filename(message.document.file_name)
@@ -74,21 +74,21 @@ class DestinationWatcher:
             self.verified_files.add(sanitized_name)
 
     def start(self):
-        """Starts the watcher."""
-        if user and not self._is_active:
-            user.add_handler(self.handler)
+        """Starts the watcher on the specified client session."""
+        if not self._is_active:
+            self.client.add_handler(self.handler)
             self._is_active = True
-            LOGGER.info(f"[Watcher] Started monitoring destination chat: {self.destination_id}")
+            session_name = "BOT" if hasattr(self.client, 'me') and self.client.me.is_bot else "USER"
+            LOGGER.info(f"[Watcher] Started monitoring destination chat {self.destination_id} using {session_name} session.")
 
     def stop(self):
         """Stops the watcher."""
-        if user and self._is_active:
-            user.remove_handler(self.handler)
+        if self._is_active:
+            self.client.remove_handler(self.handler)
             self._is_active = False
             LOGGER.info(f"[Watcher] Stopped monitoring destination chat: {self.destination_id}")
 
     def is_verified(self, sanitized_name):
-        """Checks if a file with the given sanitized name has been verified."""
         return sanitized_name in self.verified_files
 
 class SimpleChannelLeechCoordinator(TaskListener):
@@ -136,16 +136,9 @@ class SimpleChannelLeechCoordinator(TaskListener):
         self.channel_id = args['channel']
         self.filter_tags = args.get('filter', [])
         self.use_caption_as_filename = not args.get('no_caption', False)
-        if not user:
-            await send_message(self.message, "User session required!")
-            return
 
-        destination_id = await self._get_leech_destination()
-        if not destination_id:
-            await send_message(self.message, "❌ Could not determine leech destination. Please set `LEECH_DUMP_CHAT` or your personal `leech_dest`.")
+        if not await self._initialize_watcher():
             return
-        self.watcher = DestinationWatcher(destination_id, self.start_time)
-        self.watcher.start()
 
         progress = await database.get_leech_progress(self.message.from_user.id, self.channel_id)
         if progress:
@@ -201,25 +194,48 @@ class SimpleChannelLeechCoordinator(TaskListener):
             if self.watcher:
                 self.watcher.stop()
             await database.clear_leech_progress(self.message.from_user.id, self.channel_id)
-            
-    async def _get_leech_destination(self):
-        """Determines the correct leech destination chat ID based on screenshots."""
+
+    async def _initialize_watcher(self):
+        """Determines destination, checks bot access, and starts the watcher on the best session."""
+        destination_id = await self._get_leech_destination()
+        if not destination_id:
+            await send_message(self.message, "❌ Could not determine leech destination. Please set `LEECH_DUMP_CHAT` or your personal `leech_dest`.")
+            return False
+
         try:
-            # 1. Check for global LEECH_DUMP_CHAT
+            await bot.get_chat_member(destination_id, bot.me.id)
+            LOGGER.info(f"[cleech] Bot has access to destination {destination_id}. Using BOT session for watcher.")
+            self.watcher = DestinationWatcher(bot, destination_id, self.start_time)
+            self.watcher.start()
+            return True
+        except UserNotParticipant:
+            LOGGER.warning(f"[cleech] Bot is not in destination {destination_id}. Falling back to USER session for watcher.")
+        except Exception as e:
+            LOGGER.error(f"[cleech] Error checking bot access to {destination_id}: {e}. Falling back to USER session.")
+
+        if user:
+            self.watcher = DestinationWatcher(user, destination_id, self.start_time)
+            self.watcher.start()
+            return True
+        else:
+            await send_message(self.message, "❌ Bot is not in destination and USER_SESSION_STRING is not set. Cannot monitor for uploads.")
+            return False
+
+    async def _get_leech_destination(self):
+        """Determines the correct leech destination chat ID."""
+        try:
             bot_token_first_half = config_dict['BOT_TOKEN'].split(':')[0]
             bot_settings = await database.get_bot_settings(bot_token_first_half)
-            if bot_settings and bot_settings.get('LEECH_DUMP_CHAT'): # Corrected case
+            if bot_settings and bot_settings.get('LEECH_DUMP_CHAT'):
                 dump_chat_id = bot_settings['LEECH_DUMP_CHAT']
-                LOGGER.info(f"[cleech] Using global LEECH_DUMP_CHAT: {dump_chat_id}")
                 return int(dump_chat_id)
 
-            # 2. Fallback to user-specific leech_dest
-            user_session_id = user.me.id
-            user_data = await database.get_user_data(user_session_id)
-            if user_data and user_data.get('leech_dest'): # Corrected field name
-                user_dest_id = user_data['leech_dest']
-                LOGGER.info(f"[cleech] Using user-specific leech_destination: {user_dest_id}")
-                return int(user_dest_id)
+            if user:
+                user_session_id = user.me.id
+                user_data = await database.get_user_data(user_session_id)
+                if user_data and user_data.get('leech_dest'):
+                    user_dest_id = user_data['leech_dest']
+                    return int(user_dest_id)
             
             LOGGER.warning("[cleech] No leech destination configured.")
             return None
@@ -339,17 +355,14 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 except Exception as e:
                     LOGGER.warning(f"[cleech] Could not restore pending file {msg_id}: {e}")
             
-            from bot import config_dict
-            bot_token = config_dict.get('BOT_TOKEN', '')
-            bot_token_first_half = bot_token.split(':')[0] if ':' in bot_token else ''
+            bot_token_first_half = config_dict['BOT_TOKEN'].split(':')[0]
             
-            if bot_token_first_half:
-                if await database._db.tasks[bot_token_first_half].find_one():
-                    rows = database._db.tasks[bot_token_first_half].find({})
-                    async for row in rows:
-                        command_url = row["_id"]
-                        self.our_active_links.add(command_url)
-                        LOGGER.info(f"[cleech] Restored active download: {command_url}")
+            if await database._db.tasks[bot_token_first_half].find_one():
+                rows = database._db.tasks[bot_token_first_half].find({})
+                async for row in rows:
+                    command_url = row["_id"]
+                    self.our_active_links.add(command_url)
+                    LOGGER.info(f"[cleech] Restored active download: {command_url}")
         
         except Exception as e:
             LOGGER.error(f"[cleech] Error restoring resume state: {e}")
@@ -413,9 +426,9 @@ class SimpleChannelLeechCoordinator(TaskListener):
             return
         file_item = self.pending_files.pop(0)
         try:
-            COMMAND_CHANNEL_ID = -1001791052293
+            COMMAND_CHANNEL_ID = -1001791052293 # This should ideally be a config variable
             clean_name = self._generate_clean_filename(file_item['file_info'], file_item['message_id'])
-            leech_cmd = f'/leech {file_item["url"]} -n {clean_name}'
+            leech_cmd = f'/leech {file_item["url"]} -n "{clean_name}"' # Quoted filename
             command_message = await user.send_message(chat_id=COMMAND_CHANNEL_ID, text=leech_cmd)
             command_msg_id = command_message.id
             actual_stored_url = f"https://t.me/c/{str(COMMAND_CHANNEL_ID)[4:]}/{command_msg_id}"
@@ -520,6 +533,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 LOGGER.error(f"[cleech] Progress update error: {e}")
 
     async def _show_final_results(self, processed_messages, skipped_duplicates):
+        self.total_files = self.completed_count + self.failed_count
         success_rate = (self.completed_count / self.total_files * 100) if self.total_files > 0 else 0
         text = (
             f"**Channel Leech Completed!**\n\n"
