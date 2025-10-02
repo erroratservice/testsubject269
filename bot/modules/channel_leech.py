@@ -45,48 +45,55 @@ def sanitize_filename(filename):
 
 class DestinationWatcher:
     """
-    Monitors the leech destination for new files using active polling,
-    inspired by the robust fetching method in indexfiles.py.
+    Monitors the leech destination for new files using a specific MessageHandler
+    to reliably capture new uploads without stressing the user session.
     """
     def __init__(self, client_session, destination_id, start_time):
         self.client = client_session
         self.destination_id = destination_id
         self.start_time = start_time
         self.verified_files = set()
+        # Use a specific MessageHandler for reliability on the BOT session
+        filters = (document | video) & chat(self.destination_id)
+        self.handler = MessageHandler(self._on_new_message, filters=filters)
         self._is_active = False
-        self._task = None
 
-    async def _monitor_destination(self):
-        """Periodically fetches the latest messages to find new files."""
-        while self._is_active:
-            try:
-                # Fetch last 20 messages. In a high-traffic scenario, this can be increased.
-                async for message in self.client.get_chat_history(self.destination_id, limit=20):
-                    if not message or message.date < self.start_time:
-                        # Stop checking once we see messages older than our start time
-                        break
-                    
-                    sanitized_name = None
-                    # --- Logic to get sanitized name, prioritizing caption ---
-                    if message.caption:
-                        caption_first_line = message.caption.split('\n')[0].strip()
-                        sanitized_name = sanitize_filename(caption_first_line)
-                    
-                    if not sanitized_name:
-                        file_name = getattr(message.document or message.video, 'file_name', None)
-                        if file_name:
-                            sanitized_name = sanitize_filename(file_name)
-                    # --- End of logic ---
-                    
-                    if sanitized_name and sanitized_name not in self.verified_files:
-                        LOGGER.info(f"[Watcher] Detected new file in destination: {sanitized_name}")
-                        self.verified_files.add(sanitized_name)
-                        
-            except Exception as e:
-                LOGGER.error(f"[Watcher] Error while polling destination {self.destination_id}: {e}")
-            
-            # Wait before the next poll
-            await asyncio.sleep(10)
+    async def _on_new_message(self, client, message: Message):
+        """Callback for new document or video messages."""
+        if message.date < self.start_time:
+            return
+
+        sanitized_name = None
+        # Prioritize caption for filename, as per uploader's behavior
+        if message.caption:
+            caption_first_line = message.caption.split('\n')[0].strip()
+            sanitized_name = sanitize_filename(caption_first_line)
+        
+        if not sanitized_name:
+            file_name = getattr(message.document or message.video, 'file_name', None)
+            if file_name:
+                sanitized_name = sanitize_filename(file_name)
+
+        if sanitized_name:
+            LOGGER.info(f"[Watcher] Detected new file in destination: {sanitized_name}")
+            self.verified_files.add(sanitized_name)
+
+    def start(self):
+        """Starts the watcher on the specified client session."""
+        if not self._is_active:
+            self.client.add_handler(self.handler)
+            self._is_active = True
+            LOGGER.info(f"[Watcher] Started listening for media in destination chat {self.destination_id} using BOT session.")
+
+    def stop(self):
+        """Stops the watcher."""
+        if self._is_active:
+            self.client.remove_handler(self.handler)
+            self._is_active = False
+            LOGGER.info(f"[Watcher] Stopped listening in destination chat: {self.destination_id}")
+
+    def is_verified(self, sanitized_name):
+        return sanitized_name in self.verified_files
 
     def start(self):
         """Starts the watcher's background polling task."""
@@ -212,29 +219,25 @@ class SimpleChannelLeechCoordinator(TaskListener):
             await database.clear_leech_progress(self.message.from_user.id, self.channel_id)
 
     async def _initialize_watcher(self):
-        """Determines destination, checks bot access, and starts the watcher on the best session."""
+        """Determines destination and starts the watcher exclusively on the bot session."""
         destination_id = await self._get_leech_destination()
         if not destination_id:
             await send_message(self.message, "❌ Could not determine leech destination. Please set `LEECH_DUMP_CHAT` or your personal `leech_dest`.")
             return False
 
         try:
+            # Check if the bot is a member. This is a mandatory requirement now.
             await bot.get_chat_member(destination_id, bot.me.id)
             LOGGER.info(f"[cleech] Bot has access to destination {destination_id}. Using BOT session for watcher.")
             self.watcher = DestinationWatcher(bot, destination_id, self.start_time)
             self.watcher.start()
             return True
         except UserNotParticipant:
-            LOGGER.warning(f"[cleech] Bot is not in destination {destination_id}. Falling back to USER session for watcher.")
+            await send_message(self.message, f"❌ Bot is not a member of the destination channel ({destination_id}). Please add it and try again.")
+            return False
         except Exception as e:
-            LOGGER.error(f"[cleech] Error checking bot access to {destination_id}: {e}. Falling back to USER session.")
-
-        if user:
-            self.watcher = DestinationWatcher(user, destination_id, self.start_time)
-            self.watcher.start()
-            return True
-        else:
-            await send_message(self.message, "❌ Bot is not in destination and USER_SESSION_STRING is not set. Cannot monitor for uploads.")
+            LOGGER.error(f"[cleech] Error initializing watcher: {e}")
+            await send_message(self.message, f"❌ An error occurred while setting up the destination watcher: {e}")
             return False
 
     async def _get_leech_destination(self):
