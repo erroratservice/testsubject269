@@ -60,18 +60,14 @@ class DestinationWatcher:
             return
 
         sanitized_name = None
-        # --- ROBUST FILENAME LOGIC ---
-        # Priority 1: Check the first line of the caption
         if message.caption:
             caption_first_line = message.caption.split('\n')[0].strip()
             sanitized_name = sanitize_filename(caption_first_line)
         
-        # Priority 2: Fallback to the file's actual name
         if not sanitized_name:
             file_name = getattr(message.document or message.video, 'file_name', None)
             if file_name:
                 sanitized_name = sanitize_filename(file_name)
-        # --- END OF LOGIC ---
 
         if sanitized_name:
             LOGGER.info(f"[Watcher] Detected new file in destination: {sanitized_name}")
@@ -403,7 +399,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
         try:
             COMMAND_CHANNEL_ID = -1001791052293
             clean_name = self._generate_clean_filename(file_item['file_info'], file_item['message_id'])
-            leech_cmd = f'/leech {file_item["url"]} -n {clean_name}'
+            leech_cmd = f'/leech {file_item["url"]} -n "{clean_name}"'
             command_message = await user.send_message(chat_id=COMMAND_CHANNEL_ID, text=leech_cmd)
             command_msg_id = command_message.id
             actual_stored_url = f"https://t.me/c/{str(COMMAND_CHANNEL_ID)[4:]}/{command_msg_id}"
@@ -455,16 +451,25 @@ class SimpleChannelLeechCoordinator(TaskListener):
         file_item = self.link_to_file_mapping.get(completed_link)
         if not file_item:
             return False
-        sanitized_name = self._generate_clean_filename(file_item['file_info'], file_item['message_id'])
-        if self.watcher and self.watcher.is_verified(sanitized_name):
-            LOGGER.info(f"[cleech] VERIFIED upload for: {sanitized_name}")
+        
+        sanitized_name_to_check = self._generate_clean_filename(file_item['file_info'], file_item['message_id'])
+        
+        # --- VERIFICATION DEBUGGING ---
+        LOGGER.info(f"[cleech_debug] Verifying file: '{sanitized_name_to_check}'")
+        if self.watcher:
+             LOGGER.info(f"[cleech_debug] Watcher's current verified list: {self.watcher.verified_files}")
+        # --- END DEBUGGING ---
+
+        if self.watcher and self.watcher.is_verified(sanitized_name_to_check):
+            LOGGER.info(f"[cleech] VERIFIED upload for: {sanitized_name_to_check}")
             return True
         else:
             await asyncio.sleep(10)
-            if self.watcher and self.watcher.is_verified(sanitized_name):
-                LOGGER.info(f"[cleech] VERIFIED upload for (after delay): {sanitized_name}")
+            if self.watcher and self.watcher.is_verified(sanitized_name_to_check):
+                LOGGER.info(f"[cleech] VERIFIED upload for (after delay): {sanitized_name_to_check}")
                 return True
-        LOGGER.warning(f"[cleech] FAILED verification for: {sanitized_name}. Not found in destination.")
+
+        LOGGER.warning(f"[cleech] FAILED verification for: {sanitized_name_to_check}. Not found in destination.")
         return False
 
     async def _save_progress(self, interrupted=False):
