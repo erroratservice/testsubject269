@@ -269,9 +269,13 @@ class SimpleChannelLeechCoordinator(TaskListener):
         last_status_update = 0
         status_update_interval = 10
         
-        # Enhanced debugging
-        scan_timeout = 300
+        # Enhanced debugging and timeout protection
+        scan_timeout = 300  # 5 minutes timeout for batch processing
         self.scan_start_time = time.time()
+        self.iteration_timeout = 60  # 1 minute timeout per iteration
+        self.stuck_recovery_attempts = 0
+        self.max_recovery_attempts = 3
+        self.last_iteration_time = time.time()
 
         if self.resume_mode:
             await self._restore_resume_state(scanner)
@@ -308,7 +312,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 scan_totals[scan['name']] = 0
 
         try:
-            # FIXED: Proper resume logic
+            # Proper resume logic using lowest (oldest) scanned message ID
             offset_id = self.resume_from_msg_id if self.resume_from_msg_id > 0 else 0
             
             if self.resume_mode:
@@ -332,25 +336,48 @@ class SimpleChannelLeechCoordinator(TaskListener):
             
             LOGGER.info(f"[cleech] Beginning get_chat_history iteration with offset_id: {offset_id}")
             
-            # Use get_chat_history for proper chronological order with resume support
-            async for message in user.get_chat_history(
+            # Timeout protected iteration
+            message_iterator = user.get_chat_history(
                 chat_id=self.channel_chat_id,
                 offset_id=offset_id
-            ):
+            )
+            
+            async for message in message_iterator:
                 loop_iteration += 1
                 current_time = time.time()
                 self.last_message_time = current_time
+                self.last_iteration_time = current_time
                 
-                # Debugging: Detect stuck iterations
+                # Enhanced debugging with timeout detection
                 if loop_iteration % 500 == 0:
                     elapsed = current_time - self.scan_start_time
                     rate = loop_iteration / elapsed if elapsed > 0 else 0
                     LOGGER.info(f"[cleech] Processed {loop_iteration} messages in {elapsed:.1f}s (rate: {rate:.1f} msg/s)")
                 
-                if current_time - self.last_batch_time > scan_timeout:
-                    LOGGER.warning(f"[cleech] POTENTIAL HANG DETECTED: No batch processed in {scan_timeout}s")
+                # Check for iteration timeout
+                iteration_idle = current_time - self.last_iteration_time
+                if iteration_idle > self.iteration_timeout:
+                    LOGGER.error(f"[cleech] ITERATION TIMEOUT: No message received in {iteration_idle:.1f}s at iteration {loop_iteration}")
                     await self._safe_edit_message(self.status_message, 
-                        f"⚠️ **Potential hang detected at message {loop_iteration}**")
+                        f"❌ **Scan stalled at {scanned_media_count}/{total_media_files} - Attempting recovery...**")
+                    
+                    # Attempt recovery
+                    if self.stuck_recovery_attempts < self.max_recovery_attempts:
+                        self.stuck_recovery_attempts += 1
+                        LOGGER.warning(f"[cleech] Recovery attempt {self.stuck_recovery_attempts}/{self.max_recovery_attempts}")
+                        await asyncio.sleep(10)
+                        self.last_iteration_time = time.time()
+                        continue
+                    else:
+                        LOGGER.error(f"[cleech] Max recovery attempts exceeded, saving progress and stopping scan")
+                        await self._save_progress(interrupted=True)
+                        raise TimeoutError(f"Scan stalled at iteration {loop_iteration} after {self.max_recovery_attempts} recovery attempts")
+                
+                # Check for batch timeout
+                if current_time - self.last_batch_time > scan_timeout:
+                    LOGGER.warning(f"[cleech] BATCH TIMEOUT: No batch processed in {scan_timeout}s")
+                    await self._safe_edit_message(self.status_message, 
+                        f"⚠️ **Potential batch hang at message {loop_iteration}**")
                 
                 if self.is_cancelled:
                     LOGGER.info(f"[cleech] Scan cancelled at iteration {loop_iteration}")
@@ -371,6 +398,9 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 current_batch.append(message)
                 self.scanned_message_ids.add(message.id)
                 
+                # Reset recovery attempts on successful progress
+                self.stuck_recovery_attempts = 0
+                
                 # Track processing rate
                 if current_time - self.last_minute_check >= 60:
                     LOGGER.info(f"[cleech] Processed {self.messages_processed_this_minute} media messages in last minute")
@@ -382,13 +412,18 @@ class SimpleChannelLeechCoordinator(TaskListener):
                     LOGGER.info(f"[cleech] Starting completion check task during scan.")
                     completion_task = asyncio.create_task(self._wait_for_completion())
 
-                # Throttled status updates
+                # Throttled status updates with timeout info
                 if current_time - last_status_update >= status_update_interval:
                     progress_percent = (scanned_media_count / total_media_files * 100) if total_media_files > 0 else 0
                     scan_type_text = f"{self.scan_type.title()}s" if self.scan_type else "Media files"
+                    
+                    # Show rate and timeout status
+                    elapsed_total = current_time - self.scan_start_time
+                    overall_rate = scanned_media_count / elapsed_total if elapsed_total > 0 else 0
+                    
                     await self._safe_edit_message(self.status_message, 
                         f"**Scanning {scan_type_text}... ({scanned_media_count}/{total_media_files} - {progress_percent:.1f}%)**\n\n"
-                        f"**Current Msg ID:** {message.id}\n"
+                        f"**Current Msg ID:** {message.id} | **Rate:** {overall_rate:.1f} files/s\n"
                         f"**Active:** {len(self.our_active_links)}/{self.max_concurrent} | **Pending:** {len(self.pending_files)}\n"
                         f"**Completed:** {self.completed_count} | **Failed:** {self.failed_count}"
                     )
@@ -434,6 +469,11 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 
             await self._show_final_results(processed_messages, skipped_duplicates)
 
+        except TimeoutError as e:
+            LOGGER.error(f"[cleech] Timeout error: {e}")
+            await self._safe_edit_message(self.status_message, f"❌ **Scan timeout: {str(e)}**")
+            await self._save_progress(interrupted=True)
+            # Don't re-raise, let it complete normally with current progress
         except Exception as e:
             LOGGER.error(f"[cleech] Processing error at iteration {loop_iteration}: {e}", exc_info=True)
             await self._save_progress(interrupted=True)
