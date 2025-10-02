@@ -115,9 +115,15 @@ class SimpleChannelLeechCoordinator(TaskListener):
         self.resume_mode = False
         self.resume_from_msg_id = None
         self.scanned_message_ids = set()
-        self.last_success_msg_id = None
+        # REMOVED: self.last_success_msg_id - no longer needed
         self.start_time = datetime.now()
         self.watcher = None
+        # Debugging variables
+        self.last_message_time = time.time()
+        self.last_batch_time = time.time()
+        self.scan_start_time = time.time()
+        self.messages_processed_this_minute = 0
+        self.last_minute_check = time.time()
         super().__init__()
 
     async def _safe_edit_message(self, message, text):
@@ -167,21 +173,17 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 self.scan_type = progress.get("scan_type")
                 LOGGER.info(f"[cleech] Restored original scan type: {self.scan_type}")
             
-            # FIXED: Use the highest scanned message ID as resume point
-            db_resume_id = progress.get("last_success_msg_id")
+            # FIXED: Use the LOWEST (oldest) scanned message ID as resume point
             scanned_ids = self.scanned_message_ids
             
-            if db_resume_id and isinstance(db_resume_id, int):
-                self.resume_from_msg_id = db_resume_id
-                LOGGER.info(f"[cleech] Resuming from last successful download message ID: {self.resume_from_msg_id}")
-                await send_message(self.message, f"⏸️ Resuming from last successful download at message ID: {self.resume_from_msg_id}.")
-            elif scanned_ids:
-                # If no successful downloads but we have scanned messages, resume from the oldest scanned
-                self.resume_from_msg_id = max(scanned_ids)
-                LOGGER.info(f"[cleech] No successful downloads, but resuming from last scanned message ID: {self.resume_from_msg_id}")
-                await send_message(self.message, f"⏸️ Resuming scan from last processed message ID: {self.resume_from_msg_id}.")
+            if scanned_ids:
+                # Resume from the oldest (lowest ID) scanned message
+                self.resume_from_msg_id = min(scanned_ids)
+                LOGGER.info(f"[cleech] Resuming from oldest scanned message ID: {self.resume_from_msg_id}")
+                await send_message(self.message, f"⏸️ Resuming scan from message ID: {self.resume_from_msg_id} (continuing to older messages).")
             else:
                 self.resume_from_msg_id = 0
+                LOGGER.info(f"[cleech] No previous scanned messages, starting fresh")
                 await send_message(self.message, "🔄 Starting fresh scan from newest message.")
             
             if self.completed_scan_type:
@@ -544,6 +546,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
             if not potentially_completed_links: 
                 return
 
+            LOGGER.info(f"[cleech] Verifying {len(potentially_completed_links)} potentially completed downloads")
             verification_coros = [self._verify_upload_in_destination(link) for link in potentially_completed_links]
             results = await asyncio.gather(*verification_coros)
 
@@ -555,8 +558,9 @@ class SimpleChannelLeechCoordinator(TaskListener):
 
                 if is_success:
                     self.completed_count += 1
-                    self.last_success_msg_id = file_item["message_id"]
+                    # REMOVED: self.last_success_msg_id tracking - no longer needed
                     await database.add_file_entry(self.channel_chat_id, file_item['message_id'], file_item['file_info'])
+                    LOGGER.info(f"[cleech] Successfully completed: {file_item['filename']}")
                 else:
                     self.failed_count += 1
                     LOGGER.warning(f"[cleech] Verification failed for {file_item['filename']}. Marked as failed.")
@@ -582,23 +586,23 @@ class SimpleChannelLeechCoordinator(TaskListener):
         return False
 
     async def _save_progress(self, interrupted=False):
-        progress = {
-            "user_id": self.message.from_user.id,
-            "channel_id": self.channel_id,
-            "filter_tags": self.filter_tags,
-            "scan_type": self.scan_type,  # FIXED: Save original scan type
-            "last_success_msg_id": self.last_success_msg_id,
-            "scanned_message_ids": list(self.scanned_message_ids),
-            "pending_files": [f['message_id'] for f in self.pending_files] + [item['message_id'] for item in self.link_to_file_mapping.values()],
-            "timestamp": datetime.utcnow().isoformat(),
-            "interrupted": interrupted,
-            "completed_scan_type": self.completed_scan_type
-        }
-        await database.save_leech_progress(self.message.from_user.id, self.channel_id, progress)
-
-    async def _update_progress(self, processed_so_far, skipped_duplicates):
-        # Disabled to avoid conflicts with throttled updates
-        return
+        try:
+            progress = {
+                "user_id": self.message.from_user.id,
+                "channel_id": self.channel_id,
+                "filter_tags": self.filter_tags,
+                "scan_type": self.scan_type,
+                # REMOVED: "last_success_msg_id" - no longer needed
+                "scanned_message_ids": list(self.scanned_message_ids),
+                "pending_files": [f['message_id'] for f in self.pending_files] + [item['message_id'] for item in self.link_to_file_mapping.values()],
+                "timestamp": datetime.utcnow().isoformat(),
+                "interrupted": interrupted,
+                "completed_scan_type": self.completed_scan_type
+            }
+            await database.save_leech_progress(self.message.from_user.id, self.channel_id, progress)
+            LOGGER.info(f"[cleech] Progress saved: completed={self.completed_count}, failed={self.failed_count}, pending={len(self.pending_files)}")
+        except Exception as e:
+            LOGGER.error(f"[cleech] Error saving progress: {e}")
 
     async def _show_final_results(self, processed_messages, skipped_duplicates):
         total_attempted = self.completed_count + self.failed_count
