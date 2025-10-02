@@ -46,8 +46,8 @@ def sanitize_filename(filename):
 
 class DestinationWatcher:
     """
-    Monitors the leech destination for new files using a specific MessageHandler
-    to reliably capture new uploads without stressing the user session.
+    Monitors the leech destination for new files using USER session
+    for more reliable detection of bot's own uploads.
     """
     def __init__(self, client_session, destination_id, start_time):
         self.client = client_session
@@ -236,12 +236,14 @@ class SimpleChannelLeechCoordinator(TaskListener):
             await send_message(self.message, "❌ Could not determine leech destination.")
             return False
         try:
-            await bot.get_chat_member(destination_id, bot.me.id)
-            self.watcher = DestinationWatcher(bot, destination_id, self.start_time)
+            # FIXED: Use USER session for watcher instead of BOT session
+            # This ensures we can see the bot's own uploads
+            await user.get_chat_member(destination_id, user.me.id)
+            self.watcher = DestinationWatcher(user, destination_id, self.start_time)  # Changed from bot to user
             self.watcher.start()
             return True
         except UserNotParticipant:
-            await send_message(self.message, f"❌ Bot is not a member of the destination channel ({destination_id}).")
+            await send_message(self.message, f"❌ User session is not a member of the destination channel ({destination_id}).")
             return False
         except Exception as e:
             await send_message(self.message, f"❌ Error setting up watcher: {e}")
