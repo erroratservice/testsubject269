@@ -230,7 +230,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
         except:
             return None
 
-    # ---- NEW: REWRITTEN SCAN COORDINATOR ----
     async def _coordinate_simple_leech(self):
         scanner = ChannelScanner(user, self.channel_id, filter_tags=self.filter_tags)
         batch_size = 30
@@ -276,17 +275,26 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 LOGGER.info(f"[cleech] Scanning for {scan_name.upper()} messages...")
 
                 current_batch = []
+                skip_count = 0
                 
+                # FIXED: Remove offset_id parameter - use scanned_message_ids for resume
                 async for message in user.search_messages(
                     chat_id=self.channel_chat_id,
-                    filter=scan_filter,
-                    offset_id=self.resume_from_msg_id
+                    filter=scan_filter
                 ):
                     if self.is_cancelled:
                         break
                     
+                    # Skip already processed messages (this handles resume)
                     if message.id in self.scanned_message_ids:
+                        skip_count += 1
+                        if skip_count % 100 == 0:
+                            LOGGER.info(f"[cleech] Skipped {skip_count} already-scanned messages...")
                         continue
+                    
+                    if skip_count > 0:
+                        LOGGER.info(f"[cleech] Finished skipping {skip_count} messages, processing new ones")
+                        skip_count = 0
                     
                     processed_messages += 1
                     current_batch.append(message)
