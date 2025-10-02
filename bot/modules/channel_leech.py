@@ -378,9 +378,9 @@ class SimpleChannelLeechCoordinator(TaskListener):
             if file_unique_id and file_unique_id in self.pending_file_ids:
                 continue
             if str(self.channel_chat_id).startswith('-100'):
-                message_link = f"https.t.me/c/{str(self.channel_chat_id)[4:]}/{message.id}"
+                message_link = f"https://t.me/c/{str(self.channel_chat_id)[4:]}/{message.id}"
             else:
-                message_link = f"https.t.me/{self.channel_id.replace('@', '')}/{message.id}"
+                message_link = f"https://t.me/{self.channel_id.replace('@', '')}/{message.id}"
             self.pending_files.append({
                 'url': message_link,
                 'filename': file_info['file_name'],
