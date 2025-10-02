@@ -69,7 +69,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
         self.last_success_msg_id = None
         super().__init__()
 
-    async def new_event(self):
+async def new_event(self):
         text = self.message.text.split()
         args = self._parse_arguments(text[1:])
         if 'channel' not in args:
@@ -89,25 +89,30 @@ class SimpleChannelLeechCoordinator(TaskListener):
             await send_message(self.message, "User session required!")
             return
 
-        # --- CORRECTED RESUME LOGIC WITH DEBUGGING ---
+        # --- FINAL CORRECTED RESUME LOGIC WITH DEBUGGING ---
         progress = await database.get_leech_progress(self.message.from_user.id, self.channel_id)
         if progress:
             self.resume_mode = True
             self.scanned_message_ids = set(progress.get("scanned_message_ids", []))
-            
+
             # Minimal Debugging: Log what the database returns
             db_resume_id = progress.get("last_success_msg_id")
             LOGGER.info(f"[cleech_debug] Value of 'last_success_msg_id' from database: {db_resume_id}")
 
-            # FIX: Only set resume_from_msg_id if it's a valid ID from the database. Do not fall back to max().
+            # NEW ROBUST LOGIC
             if db_resume_id and isinstance(db_resume_id, int):
+                # Priority 1: Resume from last successful download (best case)
                 self.resume_from_msg_id = db_resume_id
-                await send_message(self.message, f"⏸️ Resuming previous channel leech from message {self.resume_from_msg_id}.")
+                await send_message(self.message, f"⏸️ Resuming from last successful download at message {self.resume_from_msg_id}.")
+            elif self.scanned_message_ids:
+                # Priority 2: Resume from the oldest (minimum) scanned message ID
+                self.resume_from_msg_id = min(self.scanned_message_ids)
+                await send_message(self.message, f"⏸️ No downloads finished. Resuming scan from last checked message {self.resume_from_msg_id}.")
             else:
-                # If there's no valid last success ID, it's safer to start fresh from the newest message.
-                self.resume_from_msg_id = 0 # Setting to 0 will start from the latest message.
-                await send_message(self.message, "⚠️ Could not find a valid resume point. Starting scan from the newest message.")
-            
+                # Fallback: No progress to resume from, start fresh.
+                self.resume_from_msg_id = 0
+                await send_message(self.message, "⚠️ Could not find any valid resume point. Starting scan from the newest message.")
+
             LOGGER.info(f"[cleech_debug] Final 'resume_from_msg_id' to be used: {self.resume_from_msg_id}")
 
         else:
