@@ -163,6 +163,11 @@ class SimpleChannelLeechCoordinator(TaskListener):
             self.scanned_message_ids = set(progress.get("scanned_message_ids", []))
             self.completed_scan_type = progress.get("completed_scan_type")
             
+            # FIXED: Restore original scan type if not specified in current command
+            if not self.scan_type and progress.get("scan_type"):
+                self.scan_type = progress.get("scan_type")
+                LOGGER.info(f"[cleech] Restored original scan type: {self.scan_type}")
+            
             db_resume_id = progress.get("last_success_msg_id")
 
             if db_resume_id and isinstance(db_resume_id, int):
@@ -252,7 +257,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
         
         # Throttling variables
         last_status_update = 0
-        status_update_interval = 10  # Update status every 10 seconds max
+        status_update_interval = 10
 
         if self.resume_mode:
             await self._restore_resume_state(scanner)
@@ -264,7 +269,8 @@ class SimpleChannelLeechCoordinator(TaskListener):
             LOGGER.info(f"[cleech] Starting completion check task immediately.")
             completion_task = asyncio.create_task(self._wait_for_completion())
 
-        # Determine scan order
+        # Get total counts for progress display (using search_messages_count for UI only)
+        scan_totals = {}
         scan_types = []
         if self.scan_type == 'document':
             scan_types.append({'name': 'document', 'filter': enums.MessagesFilter.DOCUMENT})
@@ -274,8 +280,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
             scan_types.append({'name': 'document', 'filter': enums.MessagesFilter.DOCUMENT})
             scan_types.append({'name': 'media', 'filter': enums.MessagesFilter.VIDEO})
 
-        # Pre-fetch total counts
-        scan_totals = {}
         for scan in scan_types:
             try:
                 total_count = await user.search_messages_count(
@@ -289,86 +293,83 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 scan_totals[scan['name']] = 0
 
         try:
-            for scan in scan_types:
-                scan_name = scan['name']
-                scan_filter = scan['filter']
-                scan_total = scan_totals.get(scan_name, 0)
-                scan_processed = 0
+            # EFFICIENT CHRONOLOGICAL SCANNING
+            # Determine starting point for chronological scan
+            offset_id = 0
+            if self.resume_mode and self.last_success_msg_id:
+                offset_id = self.last_success_msg_id
+                LOGGER.info(f"[cleech] Resuming chronological scan from message ID: {offset_id}")
+            
+            total_media_files = sum(scan_totals.values())
+            scanned_media_count = 0
+            
+            await self._safe_edit_message(self.status_message, 
+                f"**Starting chronological scan... (0/{total_media_files})**")
 
+            current_batch = []
+            
+            # Use get_chat_history for proper chronological order with resume support
+            async for message in user.get_chat_history(
+                chat_id=self.channel_chat_id,
+                offset_id=offset_id
+            ):
                 if self.is_cancelled:
                     break
                 
-                if self.resume_mode and self.completed_scan_type == scan_name:
-                    LOGGER.info(f"[cleech] Skipping already completed scan for '{scan_name}'.")
+                # IMMEDIATE FILTER: Only process media messages
+                if not (message.document or message.video):
                     continue
-
-                # Initial scan message
-                await self._safe_edit_message(self.status_message, 
-                    f"**Scanning {scan_name.title()}s... (0/{scan_total})**")
-                LOGGER.info(f"[cleech] Scanning for {scan_name.upper()} messages... Total: {scan_total}")
-
-                current_batch = []
-                skip_count = 0
                 
-                async for message in user.search_messages(
-                    chat_id=self.channel_chat_id,
-                    filter=scan_filter
-                ):
-                    if self.is_cancelled:
-                        break
-                    
-                    scan_processed += 1
-                    
-                    if message.id in self.scanned_message_ids:
-                        skip_count += 1
-                        if skip_count % 100 == 0:
-                            LOGGER.info(f"[cleech] Skipped {skip_count} already-scanned messages...")
-                        continue
-                    
-                    if skip_count > 0:
-                        LOGGER.info(f"[cleech] Finished skipping {skip_count} messages, processing new ones")
-                        skip_count = 0
-                    
-                    processed_messages += 1
-                    current_batch.append(message)
-                    self.scanned_message_ids.add(message.id)
+                # FIXED: Respect resumed scan type
+                if self.scan_type == 'document' and not message.document:
+                    continue
+                elif self.scan_type == 'media' and not message.video:
+                    continue
+                
+                scanned_media_count += 1
+                processed_messages += 1
+                current_batch.append(message)
+                self.scanned_message_ids.add(message.id)
 
-                    if completion_task is None and (self.our_active_links or self.pending_files):
-                        LOGGER.info(f"[cleech] Starting completion check task during scan.")
-                        completion_task = asyncio.create_task(self._wait_for_completion())
+                if completion_task is None and (self.our_active_links or self.pending_files):
+                    LOGGER.info(f"[cleech] Starting completion check task during scan.")
+                    completion_task = asyncio.create_task(self._wait_for_completion())
 
-                    # Throttled status updates
-                    current_time = asyncio.get_event_loop().time()
-                    if current_time - last_status_update >= status_update_interval:
-                        progress_percent = (scan_processed / scan_total * 100) if scan_total > 0 else 0
-                        await self._safe_edit_message(self.status_message, 
-                            f"**Scanning {scan_name.title()}s... ({scan_processed}/{scan_total} - {progress_percent:.1f}%)**\n\n"
-                            f"**Active:** {len(self.our_active_links)}/{self.max_concurrent} | **Pending:** {len(self.pending_files)}\n"
-                            f"**Completed:** {self.completed_count} | **Failed:** {self.failed_count}"
-                        )
-                        last_status_update = current_time
+                # Throttled status updates
+                current_time = asyncio.get_event_loop().time()
+                if current_time - last_status_update >= status_update_interval:
+                    progress_percent = (scanned_media_count / total_media_files * 100) if total_media_files > 0 else 0
+                    scan_type_text = f"{self.scan_type.title()}s" if self.scan_type else "Media files"
+                    await self._safe_edit_message(self.status_message, 
+                        f"**Scanning {scan_type_text}... ({scanned_media_count}/{total_media_files} - {progress_percent:.1f}%)**\n\n"
+                        f"**Active:** {len(self.our_active_links)}/{self.max_concurrent} | **Pending:** {len(self.pending_files)}\n"
+                        f"**Completed:** {self.completed_count} | **Failed:** {self.failed_count}"
+                    )
+                    last_status_update = current_time
 
-                    if len(current_batch) >= batch_size:
-                        batch_skipped = await self._process_batch(current_batch, scanner, processed_messages)
-                        skipped_duplicates += batch_skipped
-                        current_batch = []
-                        await asyncio.sleep(batch_sleep)
-                        await self._save_progress()
-
-                # Process remaining batch
-                if current_batch and not self.is_cancelled:
+                if len(current_batch) >= batch_size:
                     batch_skipped = await self._process_batch(current_batch, scanner, processed_messages)
                     skipped_duplicates += batch_skipped
-                
-                # Final scan completion
-                self.completed_scan_type = scan_name
+                    current_batch = []
+                    await asyncio.sleep(batch_sleep)
+                    await self._save_progress()
+
+            # Process remaining batch
+            if current_batch and not self.is_cancelled:
+                batch_skipped = await self._process_batch(current_batch, scanner, processed_messages)
+                skipped_duplicates += batch_skipped
                 await self._save_progress()
-                
-                await self._safe_edit_message(self.status_message, 
-                    f"**✅ {scan_name.title()}s completed! ({scan_processed}/{scan_total})**\n\n"
-                    f"**Active:** {len(self.our_active_links)}/{self.max_concurrent} | **Pending:** {len(self.pending_files)}\n"
-                    f"**Completed:** {self.completed_count} | **Failed:** {self.failed_count}"
-                )
+            
+            # Mark scan as completed
+            self.completed_scan_type = "all" if not self.scan_type else self.scan_type
+            await self._save_progress()
+            
+            scan_type_text = f"{self.scan_type.title()}s" if self.scan_type else "All media"
+            await self._safe_edit_message(self.status_message, 
+                f"**✅ {scan_type_text} scan completed! ({scanned_media_count}/{total_media_files})**\n\n"
+                f"**Active:** {len(self.our_active_links)}/{self.max_concurrent} | **Pending:** {len(self.pending_files)}\n"
+                f"**Completed:** {self.completed_count} | **Failed:** {self.failed_count}"
+            )
 
             # Final completion
             if completion_task:
@@ -532,6 +533,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
             "user_id": self.message.from_user.id,
             "channel_id": self.channel_id,
             "filter_tags": self.filter_tags,
+            "scan_type": self.scan_type,  # FIXED: Save original scan type
             "last_success_msg_id": self.last_success_msg_id,
             "scanned_message_ids": list(self.scanned_message_ids),
             "pending_files": [f['message_id'] for f in self.pending_files] + [item['message_id'] for item in self.link_to_file_mapping.values()],
