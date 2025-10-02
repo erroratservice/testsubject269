@@ -1,5 +1,5 @@
 from pyrogram.filters import command, chat, document, video
-from pyrogram.handlers import MessageHandler, RawUpdateHandler
+from pyrogram.handlers import MessageHandler
 from pyrogram.errors import FloodWait, UserNotParticipant
 from pyrogram.types import Message
 from bot import bot, user, LOGGER, config_dict, user_data
@@ -50,7 +50,6 @@ class DestinationWatcher:
         self.destination_id = destination_id
         self.start_time = start_time
         self.verified_files = set()
-        # Use a specific MessageHandler for reliability
         filters = (document | video) & chat(self.destination_id)
         self.handler = MessageHandler(self._on_new_message, filters=filters)
         self._is_active = False
@@ -61,11 +60,19 @@ class DestinationWatcher:
             return
 
         sanitized_name = None
-        file_name = getattr(message.document or message.video, 'file_name', None)
-
-        if file_name:
-            sanitized_name = sanitize_filename(file_name)
+        # --- ROBUST FILENAME LOGIC ---
+        # Priority 1: Check the first line of the caption
+        if message.caption:
+            caption_first_line = message.caption.split('\n')[0].strip()
+            sanitized_name = sanitize_filename(caption_first_line)
         
+        # Priority 2: Fallback to the file's actual name
+        if not sanitized_name:
+            file_name = getattr(message.document or message.video, 'file_name', None)
+            if file_name:
+                sanitized_name = sanitize_filename(file_name)
+        # --- END OF LOGIC ---
+
         if sanitized_name:
             LOGGER.info(f"[Watcher] Detected new file in destination: {sanitized_name}")
             self.verified_files.add(sanitized_name)
@@ -371,9 +378,9 @@ class SimpleChannelLeechCoordinator(TaskListener):
             if file_unique_id and file_unique_id in self.pending_file_ids:
                 continue
             if str(self.channel_chat_id).startswith('-100'):
-                message_link = f"https://t.me/c/{str(self.channel_chat_id)[4:]}/{message.id}"
+                message_link = f"https.t.me/c/{str(self.channel_chat_id)[4:]}/{message.id}"
             else:
-                message_link = f"https://t.me/{self.channel_id.replace('@', '')}/{message.id}"
+                message_link = f"https.t.me/{self.channel_id.replace('@', '')}/{message.id}"
             self.pending_files.append({
                 'url': message_link,
                 'filename': file_info['file_name'],
