@@ -83,7 +83,8 @@ class DestinationWatcher:
         if not self._is_active:
             self.client.add_handler(self.handler)
             self._is_active = True
-            LOGGER.info(f"[Watcher] Started listening for media in destination chat {self.destination_id} using BOT session.")
+            session_name = "BOT" if hasattr(self.client, 'me') and self.client.me.is_bot else "USER"
+            LOGGER.info(f"[Watcher] Started listening for media in destination chat {self.destination_id} using {session_name} session.")
 
     def stop(self):
         """Stops the watcher."""
@@ -91,25 +92,6 @@ class DestinationWatcher:
             self.client.remove_handler(self.handler)
             self._is_active = False
             LOGGER.info(f"[Watcher] Stopped listening in destination chat: {self.destination_id}")
-
-    def is_verified(self, sanitized_name):
-        return sanitized_name in self.verified_files
-
-    def start(self):
-        """Starts the watcher's background polling task."""
-        if not self._is_active:
-            self._is_active = True
-            self._task = asyncio.create_task(self._monitor_destination())
-            session_name = "BOT" if hasattr(self.client, 'me') and self.client.me.is_bot else "USER"
-            LOGGER.info(f"[Watcher] Started actively polling destination {self.destination_id} using {session_name} session.")
-
-    def stop(self):
-        """Stops the watcher's background task."""
-        if self._is_active:
-            self._is_active = False
-            if self._task:
-                self._task.cancel()
-            LOGGER.info(f"[Watcher] Stopped polling destination: {self.destination_id}")
 
     def is_verified(self, sanitized_name):
         return sanitized_name in self.verified_files
