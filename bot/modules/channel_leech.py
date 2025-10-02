@@ -1,5 +1,5 @@
-from pyrogram.filters import command
-from pyrogram.handlers import MessageHandler
+from pyrogram.filters import command, chat
+from pyrogram.handlers import MessageHandler, RawUpdateHandler
 from pyrogram.errors import FloodWait
 from bot import bot, user, LOGGER, config_dict
 from ..helper.ext_utils.bot_utils import new_task
@@ -12,7 +12,7 @@ from ..helper.listeners.task_listener import TaskListener
 import asyncio
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 
 def sanitize_filename(filename):
     """Clean filename sanitization with proper dot conversion"""
@@ -42,6 +42,55 @@ def sanitize_filename(filename):
         filename = "file"
     return filename
 
+class DestinationWatcher:
+    """Monitors the leech destination for new files to verify completion."""
+    def __init__(self, destination_id, start_time):
+        self.destination_id = destination_id
+        self.start_time = start_time
+        self.verified_files = set()
+        self.handler = RawUpdateHandler(self._on_new_message)
+        self._is_active = False
+
+    async def _on_new_message(self, client, update, users, chats):
+        """Callback for new messages in the destination chat."""
+        message = getattr(update, 'message', None)
+        if (message is None or
+            message.chat.id != self.destination_id or
+            message.date < self.start_time):
+            return # Ignore irrelevant messages
+
+        sanitized_name = None
+        caption = getattr(message, 'caption', '')
+        if caption:
+            # The sanitized name is typically the first line of the caption
+            sanitized_name = sanitize_filename(caption.split('\n')[0].strip())
+        elif message.document:
+            sanitized_name = sanitize_filename(message.document.file_name)
+        elif message.video:
+             sanitized_name = sanitize_filename(message.video.file_name)
+
+        if sanitized_name:
+            LOGGER.info(f"[Watcher] Detected new file in destination: {sanitized_name}")
+            self.verified_files.add(sanitized_name)
+
+    def start(self):
+        """Starts the watcher."""
+        if user and not self._is_active:
+            user.add_handler(self.handler)
+            self._is_active = True
+            LOGGER.info(f"[Watcher] Started monitoring destination chat: {self.destination_id}")
+
+    def stop(self):
+        """Stops the watcher."""
+        if user and self._is_active:
+            user.remove_handler(self.handler)
+            self._is_active = False
+            LOGGER.info(f"[Watcher] Stopped monitoring destination chat: {self.destination_id}")
+
+    def is_verified(self, sanitized_name):
+        """Checks if a file with the given sanitized name has been verified."""
+        return sanitized_name in self.verified_files
+
 class SimpleChannelLeechCoordinator(TaskListener):
     def __init__(self, client, message):
         self.client = client
@@ -53,7 +102,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
         self.operation_key = None
         self.use_caption_as_filename = True
         self.max_concurrent = 5
-        self.check_interval = 10
+        self.check_interval = 15
         self.pending_files = []
         self.pending_file_ids = set()
         self.pending_sanitized_names = set()
@@ -67,6 +116,8 @@ class SimpleChannelLeechCoordinator(TaskListener):
         self.resume_from_msg_id = None
         self.scanned_message_ids = set()
         self.last_success_msg_id = None
+        self.start_time = datetime.now(timezone.utc)
+        self.watcher = None
         super().__init__()
 
     async def new_event(self):
@@ -89,42 +140,42 @@ class SimpleChannelLeechCoordinator(TaskListener):
             await send_message(self.message, "User session required!")
             return
 
-        # --- FINAL CORRECTED RESUME LOGIC WITH DEBUGGING ---
+        destination_id = await self._get_leech_destination()
+        if not destination_id:
+            await send_message(self.message, "❌ Could not determine leech destination. Please set `LEECH_DUMP_CHAT` or your personal `leech_dest`.")
+            return
+        self.watcher = DestinationWatcher(destination_id, self.start_time)
+        self.watcher.start()
+
         progress = await database.get_leech_progress(self.message.from_user.id, self.channel_id)
         if progress:
             self.resume_mode = True
             self.scanned_message_ids = set(progress.get("scanned_message_ids", []))
-
-            # Minimal Debugging: Log what the database returns
+            
             db_resume_id = progress.get("last_success_msg_id")
             LOGGER.info(f"[cleech_debug] Value of 'last_success_msg_id' from database: {db_resume_id}")
 
-            # NEW ROBUST LOGIC
             if db_resume_id and isinstance(db_resume_id, int):
-                # Priority 1: Resume from last successful download (best case)
                 self.resume_from_msg_id = db_resume_id
                 await send_message(self.message, f"⏸️ Resuming from last successful download at message {self.resume_from_msg_id}.")
             elif self.scanned_message_ids:
-                # Priority 2: Resume from the oldest (minimum) scanned message ID
                 self.resume_from_msg_id = min(self.scanned_message_ids)
                 await send_message(self.message, f"⏸️ No downloads finished. Resuming scan from last checked message {self.resume_from_msg_id}.")
             else:
-                # Fallback: No progress to resume from, start fresh.
                 self.resume_from_msg_id = 0
                 await send_message(self.message, "⚠️ Could not find any valid resume point. Starting scan from the newest message.")
-
+            
             LOGGER.info(f"[cleech_debug] Final 'resume_from_msg_id' to be used: {self.resume_from_msg_id}")
-
         else:
             self.scanned_message_ids = set()
             self.resume_from_msg_id = None
-        # --- END OF CORRECTION ---
 
         try:
             chat = await user.get_chat(self.channel_id)
             self.channel_chat_id = chat.id
         except Exception as e:
             await send_message(self.message, f"Could not resolve channel: {e}")
+            self.watcher.stop()
             return
 
         self.operation_key = await channel_status.start_operation(
@@ -147,7 +198,34 @@ class SimpleChannelLeechCoordinator(TaskListener):
         finally:
             if self.operation_key:
                 await channel_status.stop_operation(self.operation_key)
+            if self.watcher:
+                self.watcher.stop()
             await database.clear_leech_progress(self.message.from_user.id, self.channel_id)
+            
+    async def _get_leech_destination(self):
+        """Determines the correct leech destination chat ID based on screenshots."""
+        try:
+            # 1. Check for global LEECH_DUMP_CHAT
+            bot_token_first_half = config_dict['BOT_TOKEN'].split(':')[0]
+            bot_settings = await database.get_bot_settings(bot_token_first_half)
+            if bot_settings and bot_settings.get('LEECH_DUMP_CHAT'): # Corrected case
+                dump_chat_id = bot_settings['LEECH_DUMP_CHAT']
+                LOGGER.info(f"[cleech] Using global LEECH_DUMP_CHAT: {dump_chat_id}")
+                return int(dump_chat_id)
+
+            # 2. Fallback to user-specific leech_dest
+            user_session_id = user.me.id
+            user_data = await database.get_user_data(user_session_id)
+            if user_data and user_data.get('leech_dest'): # Corrected field name
+                user_dest_id = user_data['leech_dest']
+                LOGGER.info(f"[cleech] Using user-specific leech_destination: {user_dest_id}")
+                return int(user_dest_id)
+            
+            LOGGER.warning("[cleech] No leech destination configured.")
+            return None
+        except Exception as e:
+            LOGGER.error(f"Error getting leech destination: {e}")
+            return None
 
     async def _coordinate_simple_leech(self):
         await edit_message(self.status_message, f"**Starting Channel Leech...**")
@@ -232,7 +310,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
             LOGGER.error(f"[cleech] Processing error: {e}")
             await self._save_progress(interrupted=True)
             raise
-            
+
     async def _restore_resume_state(self, scanner):
         try:
             progress = await database.get_leech_progress(self.message.from_user.id, self.channel_id)
@@ -275,7 +353,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
         
         except Exception as e:
             LOGGER.error(f"[cleech] Error restoring resume state: {e}")
-    
 
     async def _process_batch(self, message_batch, scanner, processed_so_far):
         batch_skipped = 0
@@ -341,7 +418,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
             leech_cmd = f'/leech {file_item["url"]} -n {clean_name}'
             command_message = await user.send_message(chat_id=COMMAND_CHANNEL_ID, text=leech_cmd)
             command_msg_id = command_message.id
-            # --- TYPO FIXED IN THIS LINE ---
             actual_stored_url = f"https://t.me/c/{str(COMMAND_CHANNEL_ID)[4:]}/{command_msg_id}"
             await asyncio.sleep(5)
             self.our_active_links.add(actual_stored_url)
@@ -353,73 +429,65 @@ class SimpleChannelLeechCoordinator(TaskListener):
     async def _wait_for_completion(self):
         self.total_files = self.completed_count + len(self.pending_files) + len(self.our_active_links)
         while (self.our_active_links or self.pending_files) and not self.is_cancelled:
-            await asyncio.sleep(self.check_interval)
-            completed_links = await self._check_completed()
+            await self._check_and_verify_tasks()
+            
             while len(self.our_active_links) < self.max_concurrent and self.pending_files:
                 await self._start_next_download()
+            
+            await asyncio.sleep(self.check_interval)
 
-    async def _check_completed(self):
-        completed_links = []
-        retries = 3
-        for i in range(retries):
-            try:
-                if database._return:
-                    return completed_links
-                
-                from bot import config_dict
-                
-                bot_token = config_dict.get('BOT_TOKEN', '')
-                bot_token_first_half = bot_token.split(':')[0] if ':' in bot_token else str(bot_token)
-                
-                LOGGER.info(f"[cleech] Checking tasks collection: tasks.{bot_token_first_half}")
-                
-                current_incomplete_links = set()
-                
-                if await database._db.tasks[bot_token_first_half].find_one():
-                    rows = database._db.tasks[bot_token_first_half].find({})
-                    async for row in rows:
-                        current_incomplete_links.add(row["_id"])
-                
-                LOGGER.info(f"[cleech] Found {len(current_incomplete_links)} incomplete tasks")
-                
-                for tracked_link in list(self.our_active_links):
-                    if tracked_link not in current_incomplete_links:
-                        success = await self._handle_completion(tracked_link)
-                        self.our_active_links.remove(tracked_link)
-                        completed_links.append(tracked_link)
-                        
-                        if success:
-                            self.completed_count += 1
-                            file_item = self.link_to_file_mapping.get(tracked_link)
-                            if file_item:
-                                self.last_success_msg_id = file_item["message_id"]
-                                await self._save_progress()
-                        else:
-                            self.failed_count += 1
-                return completed_links # Exit after successful check
-            except Exception as e:
-                LOGGER.error(f"[cleech] Error checking completion (attempt {i + 1}/{retries}): {e}")
-                if i < retries - 1:
-                    await asyncio.sleep(5) # Wait before retrying
-                else:
-                    LOGGER.error(f"[cleech] All retries failed. Completion check will be attempted again later.")
-        return completed_links
-
-    async def _handle_completion(self, completed_link):
+    async def _check_and_verify_tasks(self):
         try:
-            if completed_link not in self.link_to_file_mapping:
-                return False
-            file_item = self.link_to_file_mapping[completed_link]
-            await database.add_file_entry(
-                self.channel_chat_id,
-                file_item['message_id'],
-                file_item['file_info']
-            )
-            del self.link_to_file_mapping[completed_link]
-            return True
+            bot_token_first_half = config_dict['BOT_TOKEN'].split(':')[0]
+            
+            active_db_tasks = set()
+            if await database._db.tasks[bot_token_first_half].find_one():
+                rows = database._db.tasks[bot_token_first_half].find({})
+                async for row in rows:
+                    active_db_tasks.add(row["_id"])
+            
+            potentially_completed_links = self.our_active_links - active_db_tasks
+            if not potentially_completed_links:
+                return
+
+            verification_coros = [self._verify_upload_in_destination(link) for link in potentially_completed_links]
+            results = await asyncio.gather(*verification_coros)
+            
+            for link, is_success in zip(potentially_completed_links, results):
+                self.our_active_links.remove(link)
+                if is_success:
+                    self.completed_count += 1
+                    file_item = self.link_to_file_mapping.get(link)
+                    if file_item:
+                        self.last_success_msg_id = file_item["message_id"]
+                        await database.add_file_entry(self.channel_chat_id, file_item['message_id'], file_item['file_info'])
+                        del self.link_to_file_mapping[link]
+                    await self._save_progress()
+                else:
+                    self.failed_count += 1
+                    LOGGER.warning(f"[cleech] Verification failed for {link}. Marked as failed.")
+            
         except Exception as e:
-            LOGGER.error(f"[cleech] Error handling completion: {e}")
+            LOGGER.error(f"[cleech] CRITICAL ERROR in task completion check: {e}")
+
+    async def _verify_upload_in_destination(self, completed_link):
+        file_item = self.link_to_file_mapping.get(completed_link)
+        if not file_item:
             return False
+
+        sanitized_name = self._generate_clean_filename(file_item['file_info'], file_item['message_id'])
+        
+        if self.watcher and self.watcher.is_verified(sanitized_name):
+            LOGGER.info(f"[cleech] VERIFIED upload for: {sanitized_name}")
+            return True
+        else:
+            await asyncio.sleep(10)
+            if self.watcher and self.watcher.is_verified(sanitized_name):
+                LOGGER.info(f"[cleech] VERIFIED upload for (after delay): {sanitized_name}")
+                return True
+
+        LOGGER.warning(f"[cleech] FAILED verification for: {sanitized_name}. Not found in destination.")
+        return False
 
     async def _save_progress(self, interrupted=False):
         progress = {
