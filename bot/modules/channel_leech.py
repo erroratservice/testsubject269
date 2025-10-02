@@ -251,7 +251,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
         await edit_message(self.status_message, f"**Starting Channel Leech...**")
         scanner = ChannelScanner(user, self.channel_id, filter_tags=self.filter_tags)
         batch_size = 30
-        batch_sleep = 1
+        batch_sleep = 2
         processed_messages = 0
         skipped_duplicates = 0
         completion_task_started = False
@@ -267,73 +267,56 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 completion_task = asyncio.create_task(self._wait_for_completion())
                 completion_task_started = True
 
-        # --- OPTIMIZED MEDIA-ONLY SCANNING ---
-        # Use search_messages with media filters for efficiency
-        from pyrogram import enums
+        offset_id = 0
+        if self.resume_from_msg_id:
+            offset_id = self.resume_from_msg_id
+            LOGGER.info(f"[cleech] Resuming scan from message ID: {offset_id}")
         
-        # Define media filters for documents and videos/photos
-        media_filters = [
-            enums.MessagesFilter.DOCUMENT,
-            enums.MessagesFilter.VIDEO,
-        ]
-        
+        # --- HYBRID APPROACH: CHRONOLOGICAL + MEDIA FILTERING ---
         current_batch = []
         skip_count = 0
-        
+
         try:
-            # Scan each media type
-            for media_filter in media_filters:
+            # Use get_chat_history for chronological order, but filter for media only
+            message_iterator = user.get_chat_history(
+                chat_id=self.channel_id,
+                offset_id=offset_id
+            )
+
+            async for message in message_iterator:
+                if message.id in self.scanned_message_ids:
+                    skip_count += 1
+                    if skip_count % 100 == 0:
+                        LOGGER.info(f"[cleech] Skipped {skip_count} already-scanned messages...")
+                    continue
+                    
                 if self.is_cancelled:
                     break
                     
-                LOGGER.info(f"[cleech] Scanning for {media_filter.name} messages...")
-                
-                # Calculate offset for resume mode
-                offset = 0
-                if self.resume_mode and self.resume_from_msg_id:
-                    # For search_messages, we need to calculate how many messages to skip
-                    # This is an approximation - you might need to adjust based on your needs
-                    offset = 0  # search_messages handles chronological order automatically
-                
-                # Search for media messages only
-                async for message in user.search_messages(
-                    chat_id=self.channel_id,
-                    filter=media_filter,
-                    offset=offset
-                ):
-                    if message.id in self.scanned_message_ids:
-                        skip_count += 1
-                        if skip_count % 100 == 0:
-                            LOGGER.info(f"[cleech] Skipped {skip_count} already-scanned messages...")
-                        continue
-                        
-                    if self.is_cancelled:
-                        break
-                        
-                    # Skip messages older than resume point
-                    if self.resume_mode and self.resume_from_msg_id and message.id <= self.resume_from_msg_id:
-                        continue
-                        
-                    if skip_count > 0:
-                        LOGGER.info(f"[cleech] Finished skipping {skip_count} messages, processing new ones")
-                        skip_count = 0
-                        
-                    processed_messages += 1
-                    current_batch.append(message)
-                    self.scanned_message_ids.add(message.id)
+                # FILTER: Only process messages with media (documents, videos, photos)
+                if not (message.document or message.video):
+                    continue
                     
-                    if not completion_task_started and (self.our_active_links or self.pending_files):
-                        LOGGER.info(f"[cleech] Starting completion check task")
-                        completion_task = asyncio.create_task(self._wait_for_completion())
-                        completion_task_started = True
-                        
-                    if len(current_batch) >= batch_size:
-                        batch_skipped = await self._process_batch(current_batch, scanner, processed_messages)
-                        skipped_duplicates += batch_skipped
-                        current_batch = []
-                        await asyncio.sleep(batch_sleep)
-                        await self._save_progress()
-                        
+                if skip_count > 0:
+                    LOGGER.info(f"[cleech] Finished skipping {skip_count} messages, processing new ones")
+                    skip_count = 0
+                    
+                processed_messages += 1
+                current_batch.append(message)
+                self.scanned_message_ids.add(message.id)
+                
+                if not completion_task_started and (self.our_active_links or self.pending_files):
+                    LOGGER.info(f"[cleech] Starting completion check task")
+                    completion_task = asyncio.create_task(self._wait_for_completion())
+                    completion_task_started = True
+                    
+                if len(current_batch) >= batch_size:
+                    batch_skipped = await self._process_batch(current_batch, scanner, processed_messages)
+                    skipped_duplicates += batch_skipped
+                    current_batch = []
+                    await asyncio.sleep(batch_sleep)
+                    await self._save_progress()
+                    
             # Process remaining batch
             if current_batch and not self.is_cancelled:
                 batch_skipped = await self._process_batch(current_batch, scanner, processed_messages)
