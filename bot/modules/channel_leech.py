@@ -69,7 +69,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
         self.last_success_msg_id = None
         super().__init__()
 
-async def new_event(self):
+    async def new_event(self):
         text = self.message.text.split()
         args = self._parse_arguments(text[1:])
         if 'channel' not in args:
