@@ -348,7 +348,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
 
                 from bot import config_dict
 
-                # FIXED: Extract first half of bot token for collection name
                 bot_token = config_dict.get('BOT_TOKEN', '')
                 bot_token_first_half = bot_token.split(':')[0] if ':' in bot_token else str(bot_token)
 
@@ -356,7 +355,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
 
                 current_incomplete_links = set()
 
-                # Query using the correct collection name (first half of token)
                 if await database._db.tasks[bot_token_first_half].find_one():
                     rows = database._db.tasks[bot_token_first_half].find({})
                     async for row in rows:
@@ -378,11 +376,11 @@ class SimpleChannelLeechCoordinator(TaskListener):
                                 await self._save_progress()
                         else:
                             self.failed_count += 1
-                return completed_links  # Exit after successful check
+                return completed_links
             except Exception as e:
                 LOGGER.error(f"[cleech] Error checking completion (attempt {i + 1}/{retries}): {e}")
                 if i < retries - 1:
-                    await asyncio.sleep(5)  # Wait before retrying
+                    await asyncio.sleep(5)
                 else:
                     LOGGER.error(f"[cleech] All retries failed. Completion check will be attempted again later.")
         return completed_links
