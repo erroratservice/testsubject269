@@ -163,19 +163,26 @@ class SimpleChannelLeechCoordinator(TaskListener):
             self.scanned_message_ids = set(progress.get("scanned_message_ids", []))
             self.completed_scan_type = progress.get("completed_scan_type")
             
-            # FIXED: Restore original scan type if not specified in current command
             if not self.scan_type and progress.get("scan_type"):
                 self.scan_type = progress.get("scan_type")
                 LOGGER.info(f"[cleech] Restored original scan type: {self.scan_type}")
             
+            # FIXED: Use the highest scanned message ID as resume point
             db_resume_id = progress.get("last_success_msg_id")
-
+            scanned_ids = self.scanned_message_ids
+            
             if db_resume_id and isinstance(db_resume_id, int):
                 self.resume_from_msg_id = db_resume_id
+                LOGGER.info(f"[cleech] Resuming from last successful download message ID: {self.resume_from_msg_id}")
                 await send_message(self.message, f"⏸️ Resuming from last successful download at message ID: {self.resume_from_msg_id}.")
+            elif scanned_ids:
+                # If no successful downloads but we have scanned messages, resume from the oldest scanned
+                self.resume_from_msg_id = max(scanned_ids)
+                LOGGER.info(f"[cleech] No successful downloads, but resuming from last scanned message ID: {self.resume_from_msg_id}")
+                await send_message(self.message, f"⏸️ Resuming scan from last processed message ID: {self.resume_from_msg_id}.")
             else:
                 self.resume_from_msg_id = 0
-                await send_message(self.message, "⚠️ No successful downloads found. Starting scan from newest message.")
+                await send_message(self.message, "🔄 Starting fresh scan from newest message.")
             
             if self.completed_scan_type:
                 await send_message(self.message, f"✅ Scan for `{self.completed_scan_type}` already completed. Resuming next scan type.")
@@ -183,6 +190,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
         else:
             self.scanned_message_ids = set()
             self.resume_from_msg_id = 0
+            LOGGER.info(f"[cleech] No previous progress found, starting fresh scan"
 
         try:
             chat = await user.get_chat(self.channel_id)
