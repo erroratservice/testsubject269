@@ -190,7 +190,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
         else:
             self.scanned_message_ids = set()
             self.resume_from_msg_id = 0
-            LOGGER.info(f"[cleech] No previous progress found, starting fresh scan"
+            LOGGER.info(f"[cleech] No previous progress found, starting fresh scan")
 
         try:
             chat = await user.get_chat(self.channel_id)
@@ -263,12 +263,13 @@ class SimpleChannelLeechCoordinator(TaskListener):
         skipped_duplicates = 0
         completion_task = None
         
-        # Enhanced debugging variables
+        # Throttling variables
         last_status_update = 0
         status_update_interval = 10
-        last_processed_msg_id = None
-        messages_since_last_log = 0
-        scan_start_time = asyncio.get_event_loop().time()
+        
+        # Enhanced debugging
+        scan_timeout = 300
+        self.scan_start_time = time.time()
 
         if self.resume_mode:
             await self._restore_resume_state(scanner)
@@ -291,6 +292,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
             scan_types.append({'name': 'document', 'filter': enums.MessagesFilter.DOCUMENT})
             scan_types.append({'name': 'media', 'filter': enums.MessagesFilter.VIDEO})
 
+        LOGGER.info(f"[cleech] Getting total counts for scan types: {[s['name'] for s in scan_types]}")
         for scan in scan_types:
             try:
                 total_count = await user.search_messages_count(
@@ -304,104 +306,107 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 scan_totals[scan['name']] = 0
 
         try:
-            # Determine starting point
-            offset_id = 0
-            if self.resume_mode and self.last_success_msg_id:
-                offset_id = self.last_success_msg_id
-                LOGGER.info(f"[cleech] Resuming chronological scan from message ID: {offset_id}")
+            # FIXED: Proper resume logic
+            offset_id = self.resume_from_msg_id if self.resume_from_msg_id > 0 else 0
+            
+            if self.resume_mode:
+                if self.resume_from_msg_id > 0:
+                    LOGGER.info(f"[cleech] RESUMING: Starting from message ID {offset_id} and scanning towards older messages")
+                    await self._safe_edit_message(self.status_message, 
+                        f"**📋 Resuming scan from message {offset_id}...**")
+                else:
+                    LOGGER.info(f"[cleech] FRESH START: No previous progress, starting from newest message")
+                    await self._safe_edit_message(self.status_message, 
+                        f"**🔄 Starting fresh scan from newest message...**")
+            else:
+                LOGGER.info(f"[cleech] NEW SCAN: Starting from newest message")
+                await self._safe_edit_message(self.status_message, 
+                    f"**🚀 Starting new scan from newest message...**")
             
             total_media_files = sum(scan_totals.values())
             scanned_media_count = 0
-            
-            await self._safe_edit_message(self.status_message, 
-                f"**Starting chronological scan... (0/{total_media_files})**")
-
             current_batch = []
+            loop_iteration = 0
             
-            # Enhanced debugging: Track iteration performance
-            iteration_start_time = asyncio.get_event_loop().time()
-            LOGGER.info(f"[cleech_debug] Starting get_chat_history iteration from offset_id: {offset_id}")
+            LOGGER.info(f"[cleech] Beginning get_chat_history iteration with offset_id: {offset_id}")
             
-            try:
-                async for message in user.get_chat_history(
-                    chat_id=self.channel_chat_id,
-                    offset_id=offset_id
-                ):
-                    if self.is_cancelled:
-                        LOGGER.info(f"[cleech_debug] Scan cancelled at message ID: {message.id}")
-                        break
-                    
-                    last_processed_msg_id = message.id
-                    messages_since_last_log += 1
-                    
-                    # Debug: Log every 1000 messages to track progress
-                    if messages_since_last_log % 1000 == 0:
-                        elapsed = asyncio.get_event_loop().time() - iteration_start_time
-                        rate = messages_since_last_log / elapsed if elapsed > 0 else 0
-                        LOGGER.info(f"[cleech_debug] Processed {messages_since_last_log} messages in {elapsed:.1f}s "
-                                  f"(~{rate:.1f} msg/s). Current message ID: {message.id}")
-                    
-                    # IMMEDIATE FILTER: Only process media messages
-                    if not (message.document or message.video):
-                        continue
-                    
-                    # Respect resumed scan type
-                    if self.scan_type == 'document' and not message.document:
-                        continue
-                    elif self.scan_type == 'media' and not message.video:
-                        continue
-                    
-                    scanned_media_count += 1
-                    processed_messages += 1
-                    current_batch.append(message)
-                    self.scanned_message_ids.add(message.id)
+            # Use get_chat_history for proper chronological order with resume support
+            async for message in user.get_chat_history(
+                chat_id=self.channel_chat_id,
+                offset_id=offset_id
+            ):
+                loop_iteration += 1
+                current_time = time.time()
+                self.last_message_time = current_time
+                
+                # Debugging: Detect stuck iterations
+                if loop_iteration % 500 == 0:
+                    elapsed = current_time - self.scan_start_time
+                    rate = loop_iteration / elapsed if elapsed > 0 else 0
+                    LOGGER.info(f"[cleech] Processed {loop_iteration} messages in {elapsed:.1f}s (rate: {rate:.1f} msg/s)")
+                
+                if current_time - self.last_batch_time > scan_timeout:
+                    LOGGER.warning(f"[cleech] POTENTIAL HANG DETECTED: No batch processed in {scan_timeout}s")
+                    await self._safe_edit_message(self.status_message, 
+                        f"⚠️ **Potential hang detected at message {loop_iteration}**")
+                
+                if self.is_cancelled:
+                    LOGGER.info(f"[cleech] Scan cancelled at iteration {loop_iteration}")
+                    break
+                
+                # IMMEDIATE FILTER: Only process media messages
+                if not (message.document or message.video):
+                    continue
+                
+                # Respect resumed scan type
+                if self.scan_type == 'document' and not message.document:
+                    continue
+                elif self.scan_type == 'media' and not message.video:
+                    continue
+                
+                scanned_media_count += 1
+                processed_messages += 1
+                current_batch.append(message)
+                self.scanned_message_ids.add(message.id)
+                
+                # Track processing rate
+                if current_time - self.last_minute_check >= 60:
+                    LOGGER.info(f"[cleech] Processed {self.messages_processed_this_minute} media messages in last minute")
+                    self.messages_processed_this_minute = 0
+                    self.last_minute_check = current_time
+                self.messages_processed_this_minute += 1
 
-                    if completion_task is None and (self.our_active_links or self.pending_files):
-                        LOGGER.info(f"[cleech] Starting completion check task during scan.")
-                        completion_task = asyncio.create_task(self._wait_for_completion())
+                if completion_task is None and (self.our_active_links or self.pending_files):
+                    LOGGER.info(f"[cleech] Starting completion check task during scan.")
+                    completion_task = asyncio.create_task(self._wait_for_completion())
 
-                    # Throttled status updates with enhanced debugging
-                    current_time = asyncio.get_event_loop().time()
-                    if current_time - last_status_update >= status_update_interval:
-                        progress_percent = (scanned_media_count / total_media_files * 100) if total_media_files > 0 else 0
-                        scan_type_text = f"{self.scan_type.title()}s" if self.scan_type else "Media files"
-                        
-                        # Enhanced status with current message ID for debugging
-                        await self._safe_edit_message(self.status_message, 
-                            f"**Scanning {scan_type_text}... ({scanned_media_count}/{total_media_files} - {progress_percent:.1f}%)**\n\n"
-                            f"**Current Msg ID:** {message.id}\n"
-                            f"**Active:** {len(self.our_active_links)}/{self.max_concurrent} | **Pending:** {len(self.pending_files)}\n"
-                            f"**Completed:** {self.completed_count} | **Failed:** {self.failed_count}"
-                        )
-                        
-                        # Debug log for status updates
-                        elapsed_total = current_time - scan_start_time
-                        LOGGER.info(f"[cleech_debug] Status update: {scanned_media_count}/{total_media_files} media files "
-                                  f"({progress_percent:.1f}%) in {elapsed_total:.1f}s. Message ID: {message.id}")
-                        
-                        last_status_update = current_time
+                # Throttled status updates
+                if current_time - last_status_update >= status_update_interval:
+                    progress_percent = (scanned_media_count / total_media_files * 100) if total_media_files > 0 else 0
+                    scan_type_text = f"{self.scan_type.title()}s" if self.scan_type else "Media files"
+                    await self._safe_edit_message(self.status_message, 
+                        f"**Scanning {scan_type_text}... ({scanned_media_count}/{total_media_files} - {progress_percent:.1f}%)**\n\n"
+                        f"**Current Msg ID:** {message.id}\n"
+                        f"**Active:** {len(self.our_active_links)}/{self.max_concurrent} | **Pending:** {len(self.pending_files)}\n"
+                        f"**Completed:** {self.completed_count} | **Failed:** {self.failed_count}"
+                    )
+                    last_status_update = current_time
 
-                    if len(current_batch) >= batch_size:
-                        # Debug: Log batch processing
-                        LOGGER.debug(f"[cleech_debug] Processing batch of {len(current_batch)} messages. "
-                                   f"Latest message ID: {message.id}")
-                        
-                        batch_skipped = await self._process_batch(current_batch, scanner, processed_messages)
-                        skipped_duplicates += batch_skipped
-                        current_batch = []
-                        await asyncio.sleep(batch_sleep)
-                        await self._save_progress()
+                if len(current_batch) >= batch_size:
+                    LOGGER.info(f"[cleech] Processing batch of {len(current_batch)} messages (current msg ID: {message.id})")
+                    self.last_batch_time = current_time
+                    batch_skipped = await self._process_batch(current_batch, scanner, processed_messages)
+                    skipped_duplicates += batch_skipped
+                    current_batch = []
+                    await asyncio.sleep(batch_sleep)
+                    await self._save_progress()
+                    LOGGER.info(f"[cleech] Batch processed, continuing scan...")
 
-            except Exception as e:
-                LOGGER.error(f"[cleech_debug] CRITICAL: get_chat_history iteration failed at message ID: {last_processed_msg_id}. "
-                           f"Processed {messages_since_last_log} total messages. Error: {e}", exc_info=True)
-                # Try to save progress before re-raising
-                await self._save_progress(interrupted=True)
-                raise
-
+            LOGGER.info(f"[cleech] Completed get_chat_history iteration. Total iterations: {loop_iteration}")
+            
             # Process remaining batch
             if current_batch and not self.is_cancelled:
-                LOGGER.info(f"[cleech_debug] Processing final batch of {len(current_batch)} messages")
+                LOGGER.info(f"[cleech] Processing final batch of {len(current_batch)} messages")
                 batch_skipped = await self._process_batch(current_batch, scanner, processed_messages)
                 skipped_duplicates += batch_skipped
                 await self._save_progress()
@@ -409,12 +414,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
             # Mark scan as completed
             self.completed_scan_type = "all" if not self.scan_type else self.scan_type
             await self._save_progress()
-            
-            # Final success log
-            total_elapsed = asyncio.get_event_loop().time() - scan_start_time
-            LOGGER.info(f"[cleech_debug] Scan completed successfully in {total_elapsed:.1f}s. "
-                      f"Total messages processed: {messages_since_last_log}, "
-                      f"Media files found: {scanned_media_count}")
             
             scan_type_text = f"{self.scan_type.title()}s" if self.scan_type else "All media"
             await self._safe_edit_message(self.status_message, 
@@ -425,14 +424,16 @@ class SimpleChannelLeechCoordinator(TaskListener):
 
             # Final completion
             if completion_task:
+                LOGGER.info(f"[cleech] Waiting for completion task to finish")
                 await completion_task
             elif self.our_active_links or self.pending_files:
+                LOGGER.info(f"[cleech] Starting final wait for completion")
                 await self._wait_for_completion()
                 
             await self._show_final_results(processed_messages, skipped_duplicates)
 
         except Exception as e:
-            LOGGER.error(f"[cleech] Processing error: {e}", exc_info=True)
+            LOGGER.error(f"[cleech] Processing error at iteration {loop_iteration}: {e}", exc_info=True)
             await self._save_progress(interrupted=True)
             raise
 
