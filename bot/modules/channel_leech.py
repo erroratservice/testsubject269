@@ -156,16 +156,20 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 completion_task = asyncio.create_task(self._wait_for_completion())
                 completion_task_started = True
 
-        # CORRECTED RESUME LOGIC:
+        # --- CORRECTED RESUME LOGIC ---
         offset_id = 0
+        # If resuming, always start from the last successful message ID
         if self.resume_from_msg_id:
             offset_id = self.resume_from_msg_id
             LOGGER.info(f"[cleech] Resuming scan from message ID: {offset_id}")
-        
+        # The old logic of starting from max(scanned_ids) is removed to prevent re-scanning.
+        # If not resuming, offset_id remains 0, which starts the scan from the newest message as intended.
+
         message_iterator = user.get_chat_history(
             self.channel_id,
             offset_id=offset_id
         )
+        # --- END OF CORRECTION ---
 
         current_batch = []
         skip_count = 0
