@@ -1,7 +1,7 @@
 from pyrogram.filters import command, chat
 from pyrogram.handlers import MessageHandler, RawUpdateHandler
 from pyrogram.errors import FloodWait, UserNotParticipant
-from pyrogram.types import Message, MessageService
+from pyrogram.types import Message # MessageService is removed
 from bot import bot, user, LOGGER, config_dict, user_data
 from ..helper.ext_utils.bot_utils import new_task
 from ..helper.ext_utils.db_handler import database
@@ -55,11 +55,11 @@ class DestinationWatcher:
 
     async def _on_new_message(self, client, update, users, chats):
         """Callback for new messages that safely handles all update types."""
-        # FIX: Ensure the update is a standard Message and not a service message
-        if not isinstance(getattr(update, 'message', None), Message):
+        message = getattr(update, 'message', None)
+        # Safely ignore anything that is not a message with a chat attribute
+        if (message is None or not hasattr(message, 'chat') or message.chat is None):
             return
 
-        message = update.message
         if (message.chat.id != self.destination_id or
             message.date < self.start_time):
             return
@@ -511,7 +511,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
         await edit_message(self.status_message, text)
 
     def _generate_clean_filename(self, file_info, message_id):
-        original_filename = file_info['file_name']
+        original_filename = file_info.get('file_name', '')
         base_name = original_filename
         if self.use_caption_as_filename and file_info.get('caption_first_line'):
             base_name = file_info['caption_first_line'].strip()
