@@ -290,16 +290,16 @@ class SimpleChannelLeechCoordinator(TaskListener):
             offset_id = self.resume_from_msg_id
             LOGGER.info(f"[cleech] Resuming scan from message ID: {offset_id}")
         
-        # --- EFFICIENT SCANNING LOGIC ---
+        # --- CORRECTED EFFICIENT SCANNING LOGIC ---
         from pyrogram.enums import MessagesFilter
 
-        # This tells Pyrogram to only fetch messages that are documents OR videos
+        # This tells Pyrogram to only fetch messages that are documents OR videos by passing a list
         message_iterator = user.search_messages(
             chat_id=self.channel_id,
-            offset=offset_id, # In search_messages, offset is the starting message_id
-            filter=MessagesFilter.DOCUMENT | MessagesFilter.VIDEO
+            offset=offset_id,
+            filter=[MessagesFilter.DOCUMENT, MessagesFilter.VIDEO] # Corrected syntax
         )
-        # --- END OF EFFICIENCY LOGIC ---
+        # --- END OF CORRECTION ---
 
         current_batch = []
         skip_count = 0
