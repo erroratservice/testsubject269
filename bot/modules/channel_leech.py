@@ -1,7 +1,7 @@
 from pyrogram.filters import command, chat
 from pyrogram.handlers import MessageHandler, RawUpdateHandler
 from pyrogram.errors import FloodWait, UserNotParticipant
-from bot import bot, user, LOGGER, config_dict
+from bot import bot, user, LOGGER, config_dict, user_data
 from ..helper.ext_utils.bot_utils import new_task
 from ..helper.ext_utils.db_handler import database
 from ..helper.telegram_helper.message_utils import send_message, edit_message
@@ -222,19 +222,24 @@ class SimpleChannelLeechCoordinator(TaskListener):
             return False
 
     async def _get_leech_destination(self):
-        """Determines the correct leech destination chat ID."""
+        """Determines the correct leech destination chat ID in line with db_handler.py."""
         try:
+            # 1. Check for global LEECH_DUMP_CHAT
             bot_token_first_half = config_dict['BOT_TOKEN'].split(':')[0]
-            bot_settings = await database.get_bot_settings(bot_token_first_half)
+            bot_settings = await database._db.settings.config.find_one({"_id": bot_token_first_half})
             if bot_settings and bot_settings.get('LEECH_DUMP_CHAT'):
                 dump_chat_id = bot_settings['LEECH_DUMP_CHAT']
-                return int(dump_chat_id)
+                if isinstance(dump_chat_id, str) and dump_chat_id.strip():
+                    LOGGER.info(f"[cleech] Using global LEECH_DUMP_CHAT: {dump_chat_id}")
+                    return int(dump_chat_id)
 
+            # 2. Fallback to user-specific leech_dest from the loaded user_data dictionary
             if user:
                 user_session_id = user.me.id
-                user_data = await database.get_user_data(user_session_id)
-                if user_data and user_data.get('leech_dest'):
-                    user_dest_id = user_data['leech_dest']
+                data = user_data.get(user_session_id, {})
+                user_dest_id = data.get('leech_dest')
+                if isinstance(user_dest_id, str) and user_dest_id.strip():
+                    LOGGER.info(f"[cleech] Using user-specific leech_destination: {user_dest_id}")
                     return int(user_dest_id)
             
             LOGGER.warning("[cleech] No leech destination configured.")
@@ -250,17 +255,14 @@ class SimpleChannelLeechCoordinator(TaskListener):
         batch_sleep = 2
         processed_messages = 0
         skipped_duplicates = 0
-
         completion_task_started = False
         completion_task = None
 
         if self.resume_mode:
             await self._restore_resume_state(scanner)
             LOGGER.info(f"[cleech] Restored {len(self.pending_files)} pending, {len(self.our_active_links)} active")
-
             while len(self.our_active_links) < self.max_concurrent and self.pending_files:
                 await self._start_next_download()
-
             if self.our_active_links or self.pending_files:
                 LOGGER.info(f"[cleech] Starting completion check task immediately")
                 completion_task = asyncio.create_task(self._wait_for_completion())
@@ -271,11 +273,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
             offset_id = self.resume_from_msg_id
             LOGGER.info(f"[cleech] Resuming scan from message ID: {offset_id}")
         
-        message_iterator = user.get_chat_history(
-            self.channel_id,
-            offset_id=offset_id
-        )
-
+        message_iterator = user.get_chat_history(self.channel_id, offset_id=offset_id)
         current_batch = []
         skip_count = 0
 
@@ -286,42 +284,33 @@ class SimpleChannelLeechCoordinator(TaskListener):
                     if skip_count % 100 == 0:
                         LOGGER.info(f"[cleech] Skipped {skip_count} already-scanned messages...")
                     continue
-
                 if self.is_cancelled:
                     break
-                
                 if skip_count > 0:
                     LOGGER.info(f"[cleech] Finished skipping {skip_count} messages, processing new ones")
                     skip_count = 0
-
                 processed_messages += 1
                 current_batch.append(message)
                 self.scanned_message_ids.add(message.id)
-
                 if not completion_task_started and (self.our_active_links or self.pending_files):
                     LOGGER.info(f"[cleech] Starting completion check task")
                     completion_task = asyncio.create_task(self._wait_for_completion())
                     completion_task_started = True
-
                 if len(current_batch) >= batch_size:
                     batch_skipped = await self._process_batch(current_batch, scanner, processed_messages)
                     skipped_duplicates += batch_skipped
                     current_batch = []
                     await asyncio.sleep(batch_sleep)
                     await self._save_progress()
-
             if current_batch and not self.is_cancelled:
                 batch_skipped = await self._process_batch(current_batch, scanner, processed_messages)
                 skipped_duplicates += batch_skipped
                 await self._save_progress()
-
             if completion_task_started:
                 await completion_task
             elif self.our_active_links or self.pending_files:
                 await self._wait_for_completion()
-
             await self._show_final_results(processed_messages, skipped_duplicates)
-
         except Exception as e:
             LOGGER.error(f"[cleech] Processing error: {e}")
             await self._save_progress(interrupted=True)
@@ -332,19 +321,16 @@ class SimpleChannelLeechCoordinator(TaskListener):
             progress = await database.get_leech_progress(self.message.from_user.id, self.channel_id)
             if not progress:
                 return
-            
             pending_msg_ids = progress.get("pending_files", [])
             for msg_id in pending_msg_ids:
                 try:
                     message = await user.get_messages(self.channel_id, msg_id)
                     file_info = await scanner._extract_file_info(message)
-                    
                     if file_info:
                         if str(self.channel_chat_id).startswith('-100'):
                             message_link = f"https://t.me/c/{str(self.channel_chat_id)[4:]}/{msg_id}"
                         else:
                             message_link = f"https://t.me/{self.channel_id.replace('@', '')}/{msg_id}"
-                        
                         self.pending_files.append({
                             'url': message_link,
                             'filename': file_info['file_name'],
@@ -356,34 +342,27 @@ class SimpleChannelLeechCoordinator(TaskListener):
                     LOGGER.warning(f"[cleech] Could not restore pending file {msg_id}: {e}")
             
             bot_token_first_half = config_dict['BOT_TOKEN'].split(':')[0]
-            
             if await database._db.tasks[bot_token_first_half].find_one():
                 rows = database._db.tasks[bot_token_first_half].find({})
                 async for row in rows:
                     command_url = row["_id"]
                     self.our_active_links.add(command_url)
                     LOGGER.info(f"[cleech] Restored active download: {command_url}")
-        
         except Exception as e:
             LOGGER.error(f"[cleech] Error restoring resume state: {e}")
 
     async def _process_batch(self, message_batch, scanner, processed_so_far):
         batch_skipped = 0
-        
         for message in message_batch:
             if self.is_cancelled:
                 break
-            
             file_info = await scanner._extract_file_info(message)
             if not file_info:
                 continue
-            
             if self.filter_tags and not all(tag.lower() in file_info['search_text'].lower() for tag in self.filter_tags):
                 continue
-
             file_unique_id = file_info.get('file_unique_id')
             sanitized_name = self._generate_clean_filename(file_info, message.id)
-
             file_exists_in_db = await database.check_file_exists(
                 file_unique_id=file_unique_id,
                 file_hash=file_info.get('file_hash'),
@@ -392,18 +371,14 @@ class SimpleChannelLeechCoordinator(TaskListener):
             if file_exists_in_db:
                 batch_skipped += 1
                 continue
-
             if sanitized_name in self.pending_sanitized_names:
                 continue
-
             if file_unique_id and file_unique_id in self.pending_file_ids:
                 continue
-
             if str(self.channel_chat_id).startswith('-100'):
                 message_link = f"https://t.me/c/{str(self.channel_chat_id)[4:]}/{message.id}"
             else:
                 message_link = f"https://t.me/{self.channel_id.replace('@', '')}/{message.id}"
-            
             self.pending_files.append({
                 'url': message_link,
                 'filename': file_info['file_name'],
@@ -414,10 +389,8 @@ class SimpleChannelLeechCoordinator(TaskListener):
             self.pending_sanitized_names.add(sanitized_name)
             if file_unique_id:
                 self.pending_file_ids.add(file_unique_id)
-        
         while len(self.our_active_links) < self.max_concurrent and self.pending_files:
             await self._start_next_download()
-        
         await self._update_progress(processed_so_far, batch_skipped)
         return batch_skipped
 
@@ -426,9 +399,9 @@ class SimpleChannelLeechCoordinator(TaskListener):
             return
         file_item = self.pending_files.pop(0)
         try:
-            COMMAND_CHANNEL_ID = -1001791052293 # This should ideally be a config variable
+            COMMAND_CHANNEL_ID = -1001791052293
             clean_name = self._generate_clean_filename(file_item['file_info'], file_item['message_id'])
-            leech_cmd = f'/leech {file_item["url"]} -n {clean_name}'
+            leech_cmd = f'/leech {file_item["url"]} -n "{clean_name}"'
             command_message = await user.send_message(chat_id=COMMAND_CHANNEL_ID, text=leech_cmd)
             command_msg_id = command_message.id
             actual_stored_url = f"https://t.me/c/{str(COMMAND_CHANNEL_ID)[4:]}/{command_msg_id}"
@@ -443,29 +416,23 @@ class SimpleChannelLeechCoordinator(TaskListener):
         self.total_files = self.completed_count + len(self.pending_files) + len(self.our_active_links)
         while (self.our_active_links or self.pending_files) and not self.is_cancelled:
             await self._check_and_verify_tasks()
-            
             while len(self.our_active_links) < self.max_concurrent and self.pending_files:
                 await self._start_next_download()
-            
             await asyncio.sleep(self.check_interval)
 
     async def _check_and_verify_tasks(self):
         try:
             bot_token_first_half = config_dict['BOT_TOKEN'].split(':')[0]
-            
             active_db_tasks = set()
             if await database._db.tasks[bot_token_first_half].find_one():
                 rows = database._db.tasks[bot_token_first_half].find({})
                 async for row in rows:
                     active_db_tasks.add(row["_id"])
-            
             potentially_completed_links = self.our_active_links - active_db_tasks
             if not potentially_completed_links:
                 return
-
             verification_coros = [self._verify_upload_in_destination(link) for link in potentially_completed_links]
             results = await asyncio.gather(*verification_coros)
-            
             for link, is_success in zip(potentially_completed_links, results):
                 self.our_active_links.remove(link)
                 if is_success:
@@ -479,7 +446,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 else:
                     self.failed_count += 1
                     LOGGER.warning(f"[cleech] Verification failed for {link}. Marked as failed.")
-            
         except Exception as e:
             LOGGER.error(f"[cleech] CRITICAL ERROR in task completion check: {e}")
 
@@ -487,9 +453,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
         file_item = self.link_to_file_mapping.get(completed_link)
         if not file_item:
             return False
-
         sanitized_name = self._generate_clean_filename(file_item['file_info'], file_item['message_id'])
-        
         if self.watcher and self.watcher.is_verified(sanitized_name):
             LOGGER.info(f"[cleech] VERIFIED upload for: {sanitized_name}")
             return True
@@ -498,7 +462,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
             if self.watcher and self.watcher.is_verified(sanitized_name):
                 LOGGER.info(f"[cleech] VERIFIED upload for (after delay): {sanitized_name}")
                 return True
-
         LOGGER.warning(f"[cleech] FAILED verification for: {sanitized_name}. Not found in destination.")
         return False
 
@@ -577,7 +540,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
 
     def cancel_task(self):
         self.is_cancelled = True
-
 
 class ChannelScanListener(TaskListener):
     def __init__(self, client, message):
