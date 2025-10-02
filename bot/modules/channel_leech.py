@@ -386,7 +386,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
                     LOGGER.error(f"[cleech] All retries failed. Completion check will be attempted again later.")
         return completed_links
 
-        async def _handle_completion(self, completed_link):
+    async def _handle_completion(self, completed_link):
         try:
             if completed_link not in self.link_to_file_mapping:
                 return False
@@ -401,7 +401,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
         except Exception as e:
             LOGGER.error(f"[cleech] Error handling completion: {e}")
             return False
-            
 
     async def _save_progress(self, interrupted=False):
         progress = {
