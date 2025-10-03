@@ -47,7 +47,7 @@ def sanitize_filename(filename):
     return filename
 
 class SimpleChannelLeechCoordinator(TaskListener):
-    # 🔧 ENHANCED: Memory-safe coordinator tracking using WeakValueDictionary
+    # Memory-safe coordinator tracking using WeakValueDictionary
     _active_coordinators = weakref.WeakValueDictionary()
     _coordinator_counter = 0
 
@@ -77,9 +77,13 @@ class SimpleChannelLeechCoordinator(TaskListener):
         self.resume_from_msg_id = None
         self.scanned_message_ids = set()
         self.start_time = datetime.now()
+        
+        # Unique coordinator ID for memory management
         SimpleChannelLeechCoordinator._coordinator_counter += 1
         self._coordinator_id = f"{message.from_user.id}_{self.channel_id}_{SimpleChannelLeechCoordinator._coordinator_counter}"
         self._is_active = False
+        
+        # Debugging variables
         self.last_message_time = time.time()
         self.last_batch_time = time.time()
         self.scan_start_time = time.time()
@@ -87,53 +91,36 @@ class SimpleChannelLeechCoordinator(TaskListener):
         self.last_minute_check = time.time()
         super().__init__()
 
-    # 🔧 ENHANCED: Task completion handler with better error handling
+    # Task completion handler
     @classmethod
     async def handle_task_completion(cls, link, name, size, files, folders, mime_type):
-        
-        # Find which coordinator owns this task
-        found_coordinator = None
+        """Called by TaskListener when any task completes"""
         for coord_id, coordinator in list(cls._active_coordinators.items()):
             try:
                 if coordinator and link in coordinator.our_active_links:
-                    found_coordinator = coordinator
-                    break
+                    await coordinator._handle_our_task_completion(link, name, size, files, folders, mime_type)
+                    return
             except (AttributeError, ReferenceError):
                 continue
-                
-        if found_coordinator:
-            await found_coordinator._handle_our_task_completion(link, name, size, files, folders, mime_type)
-        else:
-            LOGGER.debug(f"[CLEECH-CALLBACK] No coordinator found for link: {link}")
 
-    # 🔧 NEW: Task failure handler
+    # Task failure handler
     @classmethod
     async def handle_task_failure(cls, link, error):
-        
-        # Find which coordinator owns this task
-        found_coordinator = None
+        """Called by TaskListener when any task fails"""
         for coord_id, coordinator in list(cls._active_coordinators.items()):
             try:
                 if coordinator and link in coordinator.our_active_links:
-                    found_coordinator = coordinator
-                    break
+                    await coordinator._handle_our_task_failure(link, error)
+                    return
             except (AttributeError, ReferenceError):
                 continue
-                
-        if found_coordinator:
-            await found_coordinator._handle_our_task_failure(link, error)
-        else:
-            LOGGER.debug(f"[CLEECH-CALLBACK] No coordinator found for failed link: {link}")
 
-    # 🔧 ENHANCED: Memory management utilities
+    # Memory management utilities
     @classmethod
     def cleanup_stale_coordinators(cls):
         """Clean up any stale coordinator references"""
-        initial_count = len(cls._active_coordinators)
         # WeakValueDictionary automatically cleans up garbage collected references
-        current_count = len(cls._active_coordinators)
-        if initial_count != current_count:
-            LOGGER.debug(f"[CLEECH-CLEANUP] Cleaned up {initial_count - current_count} stale coordinator references")
+        pass
 
     @classmethod
     def get_active_coordinator_count(cls):
@@ -156,7 +143,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
     async def _handle_our_task_completion(self, link, name, size, files, folders, mime_type):
         """Handle completion of our tracked task - called by TaskListener callback"""
         try:
-            
             # Remove from our tracking
             self.our_active_links.discard(link)
             file_item = self.link_to_file_mapping.pop(link, None)
@@ -171,26 +157,23 @@ class SimpleChannelLeechCoordinator(TaskListener):
             if file_unique_id:
                 self.pending_file_ids.discard(file_unique_id)
 
-            # 🎯 SUCCESS: Add to database and update counters
+            # SUCCESS: Add to database and update counters
             self.completed_count += 1
             await database.add_file_entry(self.channel_chat_id, file_item['message_id'], file_item['file_info'])
             
             # Start next downloads immediately
-            downloads_started = 0
             while len(self.our_active_links) < self.max_concurrent and self.pending_files:
                 await self._start_next_download()
-                downloads_started += 1
                 
             await self._save_progress()
             
         except Exception as e:
-            LOGGER.error(f"[CLEECH-SUCCESS] Error handling task completion: {e}", exc_info=True)
+            LOGGER.error(f"[CLEECH] Error handling task completion: {e}", exc_info=True)
 
-    # 🔧 NEW: Task failure handler
+    # Task failure handler
     async def _handle_our_task_failure(self, link, error):
         """Handle failure of our tracked task - called by TaskListener callback"""
         try:
-            
             # Clean up tracking
             self.our_active_links.discard(link)
             file_item = self.link_to_file_mapping.pop(link, None)
@@ -202,22 +185,18 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 file_unique_id = file_item['file_info'].get('file_unique_id')
                 if file_unique_id:
                     self.pending_file_ids.discard(file_unique_id)
-                
-            else:
             
             # Update counters
             self.failed_count += 1
             
             # Start next downloads immediately
-            downloads_started = 0
             while len(self.our_active_links) < self.max_concurrent and self.pending_files:
                 await self._start_next_download()
-                downloads_started += 1
-            
+                
             await self._save_progress()
             
         except Exception as e:
-            LOGGER.error(f"[CLEECH-FAILURE] Error handling task failure: {e}", exc_info=True)
+            LOGGER.error(f"[CLEECH] Error handling task failure: {e}", exc_info=True)
 
     async def _safe_edit_message(self, message, text):
         """Safely edit message with FloodWait handling"""
@@ -253,7 +232,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
         self.use_caption_as_filename = not args.get('no_caption', False)
         self.scan_type = args.get('type')
 
-        # 🔧 ENHANCED: Register coordinator safely
+        # Register coordinator safely
         self._register_coordinator()
 
         try:
@@ -265,16 +244,13 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 
                 if not self.scan_type and progress.get("scan_type"):
                     self.scan_type = progress.get("scan_type")
-                    LOGGER.info(f"[cleech] Restored original scan type: {self.scan_type}")
                 
                 scanned_ids = self.scanned_message_ids
                 if scanned_ids:
                     self.resume_from_msg_id = min(scanned_ids)
-                    LOGGER.info(f"[cleech] Resuming from oldest scanned message ID: {self.resume_from_msg_id}")
                     await send_message(self.message, f"⏸️ Resuming scan from message ID: {self.resume_from_msg_id} (continuing to older messages).")
                 else:
                     self.resume_from_msg_id = 0
-                    LOGGER.info(f"[cleech] No previous scanned messages, starting fresh")
                     await send_message(self.message, "🔄 Starting fresh scan from newest message.")
                 
                 if self.completed_scan_type:
@@ -282,7 +258,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
             else:
                 self.scanned_message_ids = set()
                 self.resume_from_msg_id = 0
-                LOGGER.info(f"[cleech] No previous progress found, starting fresh scan")
 
             try:
                 chat = await user.get_chat(self.channel_id)
@@ -320,7 +295,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
             LOGGER.error(f"[cleech] Critical error in new_event: {e}", exc_info=True)
             await send_message(self.message, f"❌ Error: {str(e)}")
         finally:
-            # 🔧 ENHANCED: Always unregister coordinator
+            # Always unregister coordinator
             self._unregister_coordinator()
 
     async def _coordinate_simple_leech(self):
@@ -357,11 +332,10 @@ class SimpleChannelLeechCoordinator(TaskListener):
 
         if self.resume_mode:
             await self._restore_resume_state(scanner)
-            LOGGER.info(f"[cleech] Restored {len(self.pending_files)} pending, {len(self.our_active_links)} active downloads.")
             while len(self.our_active_links) < self.max_concurrent and self.pending_files:
                 await self._start_next_download()
         
-        # 🔧 SIMPLIFIED: Start callback-based completion monitoring
+        # Start callback-based completion monitoring
         if self.our_active_links or self.pending_files:
             completion_task = asyncio.create_task(self._wait_for_completion_callback_mode())
 
@@ -560,25 +534,16 @@ class SimpleChannelLeechCoordinator(TaskListener):
             await self._save_progress(interrupted=True)
             raise
 
-    # 🔧 SIMPLIFIED: Callback-based completion waiting (no polling!)
+    # Callback-based completion waiting (no polling!)
     async def _wait_for_completion_callback_mode(self):
         """Wait for completion using TaskListener callbacks - no database polling!"""
-        LOGGER.info(f"[CLEECH-WAIT] Starting callback-based completion monitoring")
-        
         while (self.our_active_links or self.pending_files) and not self.is_cancelled:
             # Start new downloads if slots available
-            downloads_started = 0
             while len(self.our_active_links) < self.max_concurrent and self.pending_files:
                 await self._start_next_download()
-                downloads_started += 1
             
-            if downloads_started > 0:
-                LOGGER.info(f"[CLEECH-WAIT] Started {downloads_started} new downloads. Active: {len(self.our_active_links)}, Pending: {len(self.pending_files)}")
-            
-            # 🎯 LONGER SLEEP: Callbacks handle completion, we just keep alive
-            await asyncio.sleep(10)  # TaskListener callbacks handle everything!
-        
-        LOGGER.info(f"[CLEECH-WAIT] Completion monitoring finished - no more active or pending tasks")
+            # TaskListener callbacks handle completion, we just keep alive
+            await asyncio.sleep(10)
 
     async def _restore_resume_state(self, scanner):
         try:
@@ -683,20 +648,18 @@ class SimpleChannelLeechCoordinator(TaskListener):
             clean_name = self._generate_clean_filename(file_item['file_info'])
             leech_cmd = f'/leech {file_item["url"]} -n {clean_name}'
             
-            LOGGER.info(f"[CLEECH-START] Starting download: {clean_name}")
             command_message = await user.send_message(chat_id=COMMAND_CHANNEL_ID, text=leech_cmd)
             actual_stored_url = f"https://t.me/c/{str(COMMAND_CHANNEL_ID)[4:]}/{command_message.id}"
             
             await asyncio.sleep(2)
             self.our_active_links.add(actual_stored_url)
             self.link_to_file_mapping[actual_stored_url] = file_item
-            LOGGER.info(f"[CLEECH-START] Download queued: {clean_name} -> {actual_stored_url}")
             
         except Exception as e:
-            LOGGER.error(f"[cleech] Error starting download for {file_item.get('filename')}: {e}", exc_info=True)
+            LOGGER.error(f"[cleech] Error starting download for {file_item.get('filename')}: {e}")
             self.pending_files.insert(0, file_item)
             
-            # 🔧 ENHANCED: Clean up tracking sets on failure to prevent permanent blocking
+            # Clean up tracking sets on failure to prevent permanent blocking
             sanitized_name = self._generate_clean_filename(file_item['file_info'])
             self.pending_sanitized_names.discard(sanitized_name)
             file_unique_id = file_item['file_info'].get('file_unique_id')
@@ -775,17 +738,17 @@ class SimpleChannelLeechCoordinator(TaskListener):
         # Clean up coordinator registration
         self._unregister_coordinator()
 
-    # 🔧 ENHANCED: Add destructor for extra safety
+    # Add destructor for extra safety
     def __del__(self):
         """Ensure coordinator is unregistered on garbage collection"""
         try:
             if hasattr(self, '_is_active') and self._is_active:
                 # This won't work in async context, but provides safety net
-                LOGGER.debug(f"[CLEECH-CLEANUP] Coordinator {getattr(self, '_coordinator_id', 'unknown')} garbage collected")
+                pass
         except:
             pass
 
-# 🔧 UNCHANGED: Keep existing classes
+# Keep existing classes unchanged
 class ChannelScanListener(TaskListener):
     def __init__(self, client, message):
         self.client = client
