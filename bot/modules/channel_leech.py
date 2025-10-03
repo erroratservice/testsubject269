@@ -283,7 +283,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
         # ENHANCED: Rate limit protection
         request_count = 0
         last_rate_reset = time.time()
-        max_requests_per_30s = 25  # Stay under Telegram's 30 req/30s limit
+        max_requests_per_30s = 300  # Stay under Telegram's 30 req/30s limit
         iterator_timeout = 300  # 5 minutes timeout for iterator
 
         if self.resume_mode:
