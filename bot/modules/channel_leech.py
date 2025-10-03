@@ -45,52 +45,10 @@ def sanitize_filename(filename):
         filename = "file"
     return filename
 
-class DestinationWatcher:
-    """
-    Monitors the leech destination for new files using USER session
-    for more reliable detection of bot's own uploads.
-    """
-    def __init__(self, client_session, destination_id, start_time):
-        self.client = client_session
-        self.destination_id = destination_id
-        self.start_time = start_time
-        self.verified_files = set()
-        filters = (document | video) & chat(self.destination_id)
-        self.handler = MessageHandler(self._on_new_message, filters=filters)
-        self._is_active = False
-
-    async def _on_new_message(self, client, message: Message):
-        if message.date < self.start_time:
-            return
-        sanitized_name = None
-        if message.caption:
-            caption_first_line = message.caption.split('\n')[0].strip()
-            sanitized_name = sanitize_filename(caption_first_line)
-        if not sanitized_name:
-            file_name = getattr(message.document or message.video, 'file_name', None)
-            if file_name:
-                sanitized_name = sanitize_filename(file_name)
-        if sanitized_name:
-            LOGGER.info(f"[Watcher] Detected new file in destination: {sanitized_name}")
-            self.verified_files.add(sanitized_name)
-
-    def start(self):
-        if not self._is_active:
-            self.client.add_handler(self.handler)
-            self._is_active = True
-            session_name = "BOT" if hasattr(self.client, 'me') and self.client.me.is_bot else "USER"
-            LOGGER.info(f"[Watcher] Started listening for media in destination chat {self.destination_id} using {session_name} session.")
-
-    def stop(self):
-        if self._is_active:
-            self.client.remove_handler(self.handler)
-            self._is_active = False
-            LOGGER.info(f"[Watcher] Stopped listening in destination chat: {self.destination_id}")
-
-    def is_verified(self, sanitized_name):
-        return sanitized_name in self.verified_files
-
 class SimpleChannelLeechCoordinator(TaskListener):
+    # 🔧 CLASS-LEVEL: Track all active coordinators
+    _active_coordinators = {}
+
     def __init__(self, client, message):
         self.client = client
         self.message = message
@@ -106,7 +64,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
         self.check_interval = 10
         self.pending_files = []
         self.pending_file_ids = set()
-        self.pending_sanitized_names = set()  # PRIMARY: Track sanitized names in queue
+        self.pending_sanitized_names = set()
         self.our_active_links = set()
         self.completed_count = 0
         self.failed_count = 0
@@ -117,7 +75,8 @@ class SimpleChannelLeechCoordinator(TaskListener):
         self.resume_from_msg_id = None
         self.scanned_message_ids = set()
         self.start_time = datetime.now()
-        self.watcher = None
+        # 🔧 REMOVED: self.watcher = None  # No longer needed!
+        
         # Debugging variables
         self.last_message_time = time.time()
         self.last_batch_time = time.time()
@@ -125,6 +84,54 @@ class SimpleChannelLeechCoordinator(TaskListener):
         self.messages_processed_this_minute = 0
         self.last_minute_check = time.time()
         super().__init__()
+
+    # 🔧 STATIC METHOD: Handle task completion from TaskListener
+    @classmethod
+    async def handle_task_completion(cls, link, name, size, files, folders, mime_type):
+        """Called by TaskListener when any task completes"""
+        LOGGER.info(f"[CLEECH-CALLBACK] Task completion received: {name} | Link: {link}")
+        
+        # Find which coordinator owns this task
+        for coord_id, coordinator in cls._active_coordinators.items():
+            if link in coordinator.our_active_links:
+                LOGGER.info(f"[CLEECH-CALLBACK] Found owning coordinator {coord_id}: {name}")
+                await coordinator._handle_our_task_completion(link, name, size, files, folders, mime_type)
+                return
+                
+        LOGGER.debug(f"[CLEECH-CALLBACK] No coordinator found for link: {link}")
+
+    async def _handle_our_task_completion(self, link, name, size, files, folders, mime_type):
+        """Handle completion of our tracked task - called by TaskListener callback"""
+        LOGGER.info(f"[CLEECH-SUCCESS] ✅ Task completed instantly: {name} ({size} bytes)")
+        
+        # Remove from our tracking
+        self.our_active_links.discard(link)
+        file_item = self.link_to_file_mapping.pop(link, None)
+        
+        if not file_item:
+            LOGGER.warning(f"[CLEECH-SUCCESS] Task not in our mapping: {link}")
+            return
+            
+        # Clean up queue tracking
+        sanitized_name = self._generate_clean_filename(file_item['file_info'])
+        self.pending_sanitized_names.discard(sanitized_name)
+        file_unique_id = file_item['file_info'].get('file_unique_id')
+        if file_unique_id:
+            self.pending_file_ids.discard(file_unique_id)
+
+        # 🎯 SUCCESS: Add to database and update counters
+        self.completed_count += 1
+        await database.add_file_entry(self.channel_chat_id, file_item['message_id'], file_item['file_info'])
+        LOGGER.info(f"[CLEECH-SUCCESS] Added to database: {sanitized_name}")
+        
+        # Start next downloads immediately
+        downloads_started = 0
+        while len(self.our_active_links) < self.max_concurrent and self.pending_files:
+            await self._start_next_download()
+            downloads_started += 1
+            
+        LOGGER.info(f"[CLEECH-SUCCESS] Started {downloads_started} new downloads. Active: {len(self.our_active_links)}, Pending: {len(self.pending_files)}")
+        await self._save_progress()
 
     async def _safe_edit_message(self, message, text):
         """Safely edit message with FloodWait handling"""
@@ -160,8 +167,10 @@ class SimpleChannelLeechCoordinator(TaskListener):
         self.use_caption_as_filename = not args.get('no_caption', False)
         self.scan_type = args.get('type')
 
-        if not await self._initialize_watcher():
-            return
+        # 🔧 REGISTER: Add this coordinator to active list
+        coord_id = f"{self.message.from_user.id}_{self.channel_id}"
+        self._active_coordinators[coord_id] = self
+        LOGGER.info(f"[CLEECH-INIT] Registered coordinator {coord_id}")
 
         progress = await database.get_leech_progress(self.message.from_user.id, self.channel_id)
         if progress:
@@ -173,11 +182,8 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 self.scan_type = progress.get("scan_type")
                 LOGGER.info(f"[cleech] Restored original scan type: {self.scan_type}")
             
-            # FIXED: Use the LOWEST (oldest) scanned message ID as resume point
             scanned_ids = self.scanned_message_ids
-            
             if scanned_ids:
-                # Resume from the oldest (lowest ID) scanned message
                 self.resume_from_msg_id = min(scanned_ids)
                 LOGGER.info(f"[cleech] Resuming from oldest scanned message ID: {self.resume_from_msg_id}")
                 await send_message(self.message, f"⏸️ Resuming scan from message ID: {self.resume_from_msg_id} (continuing to older messages).")
@@ -188,7 +194,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
             
             if self.completed_scan_type:
                 await send_message(self.message, f"✅ Scan for `{self.completed_scan_type}` already completed. Resuming next scan type.")
-
         else:
             self.scanned_message_ids = set()
             self.resume_from_msg_id = 0
@@ -199,8 +204,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
             self.channel_chat_id = chat.id
         except Exception as e:
             await send_message(self.message, f"Could not resolve channel: {e}")
-            if self.watcher:
-                self.watcher.stop()
             return
 
         self.operation_key = await channel_status.start_operation(
@@ -223,45 +226,18 @@ class SimpleChannelLeechCoordinator(TaskListener):
             LOGGER.error(f"[cleech] Coordination Error: {e}", exc_info=True)
             await self._safe_edit_message(self.status_message, f"Error: {str(e)}")
         finally:
+            # 🔧 UNREGISTER: Remove from active coordinators
+            self._active_coordinators.pop(coord_id, None)
+            LOGGER.info(f"[CLEECH-CLEANUP] Unregistered coordinator {coord_id}")
+            
             if self.operation_key:
                 await channel_status.stop_operation(self.operation_key)
-            if self.watcher:
-                self.watcher.stop()
             if not self.is_cancelled:
                 await database.clear_leech_progress(self.message.from_user.id, self.channel_id)
 
-    async def _initialize_watcher(self):
-        destination_id = await self._get_leech_destination()
-        if not destination_id:
-            await send_message(self.message, "❌ Could not determine leech destination.")
-            return False
-        try:
-            # FIXED: Use USER session for watcher instead of BOT session
-            # This ensures we can see the bot's own uploads
-            await user.get_chat_member(destination_id, user.me.id)
-            self.watcher = DestinationWatcher(user, destination_id, self.start_time)  # Changed from bot to user
-            self.watcher.start()
-            return True
-        except UserNotParticipant:
-            await send_message(self.message, f"❌ User session is not a member of the destination channel ({destination_id}).")
-            return False
-        except Exception as e:
-            await send_message(self.message, f"❌ Error setting up watcher: {e}")
-            return False
-
-    async def _get_leech_destination(self):
-        try:
-            if user:
-                data = user_data.get(user.me.id, {})
-                if dest := data.get('leech_dest'):
-                    return int(dest)
-            return int(config_dict['LEECH_DUMP_CHAT'])
-        except:
-            return None
-
     async def _coordinate_simple_leech(self):
         scanner = ChannelScanner(user, self.channel_id, filter_tags=self.filter_tags)
-        batch_size = 100  # Increased for better efficiency
+        batch_size = 100
         batch_sleep = 5
         processed_messages = 0
         skipped_duplicates = 0
@@ -279,14 +255,14 @@ class SimpleChannelLeechCoordinator(TaskListener):
         self.max_recovery_attempts = 3
         self.last_iteration_time = time.time()
         
-        # Rate limit protection (hidden from status)
+        # Rate limit protection
         api_request_count = 0
         files_processed_count = 0
         last_rate_reset = time.time()
         max_api_requests_per_30s = 25
         max_files_per_30s = 500
         
-        # ENHANCED: Track skipped files for status
+        # Track skipped files for status
         skipped_filter_mismatch = 0
         skipped_existing_files = 0
         skipped_duplicates_in_queue = 0
@@ -297,8 +273,9 @@ class SimpleChannelLeechCoordinator(TaskListener):
             while len(self.our_active_links) < self.max_concurrent and self.pending_files:
                 await self._start_next_download()
         
+        # 🔧 SIMPLIFIED: Start callback-based completion monitoring
         if self.our_active_links or self.pending_files:
-            completion_task = asyncio.create_task(self._wait_for_completion())
+            completion_task = asyncio.create_task(self._wait_for_completion_callback_mode())
 
         # Get total counts for progress display
         scan_totals = {}
@@ -340,7 +317,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
             current_batch = []
             loop_iteration = 0
             
-            # Timeout protected iteration
             message_iterator = user.get_chat_history(
                 chat_id=self.channel_chat_id,
                 offset_id=offset_id
@@ -352,7 +328,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 self.last_message_time = current_time
                 self.last_iteration_time = current_time
                 
-                # REDUCED: Only log every 2000 messages instead of 500
                 if loop_iteration % 2000 == 0:
                     elapsed = current_time - self.scan_start_time
                     rate = loop_iteration / elapsed if elapsed > 0 else 0
@@ -399,9 +374,9 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 self.messages_processed_this_minute += 1
 
                 if completion_task is None and (self.our_active_links or self.pending_files):
-                    completion_task = asyncio.create_task(self._wait_for_completion())
+                    completion_task = asyncio.create_task(self._wait_for_completion_callback_mode())
 
-                # ENHANCED: Status updates with skipped file details
+                # Enhanced status updates with skipped file details
                 if current_time - last_status_update >= status_update_interval:
                     progress_percent = (scanned_media_count / total_media_files * 100) if total_media_files > 0 else 0
                     scan_type_text = f"{self.scan_type.title()}s" if self.scan_type else "Media files"
@@ -409,7 +384,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
                     elapsed_total = current_time - self.scan_start_time
                     overall_rate = scanned_media_count / elapsed_total if elapsed_total > 0 else 0
                     
-                    # Calculate total skipped
                     total_skipped = skipped_filter_mismatch + skipped_existing_files + skipped_duplicates_in_queue
                     
                     await self._safe_edit_message(self.status_message, 
@@ -424,7 +398,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 if len(current_batch) >= batch_size:
                     current_time = time.time()
                     
-                    # HIDDEN: Rate limiting check (no logging)
+                    # Rate limiting check
                     if current_time - last_rate_reset >= 30:
                         api_request_count = 0
                         files_processed_count = 0
@@ -451,7 +425,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
                     self.last_batch_time = current_time
                     batch_skip_counts = await self._process_batch_with_skip_tracking(current_batch, scanner, processed_messages)
                     
-                    # Update skip counters
                     skipped_filter_mismatch += batch_skip_counts['filter']
                     skipped_existing_files += batch_skip_counts['existing']
                     skipped_duplicates_in_queue += batch_skip_counts['queued']
@@ -486,7 +459,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
             if completion_task:
                 await completion_task
             elif self.our_active_links or self.pending_files:
-                await self._wait_for_completion()
+                await self._wait_for_completion_callback_mode()
                 
             await self._show_final_results(processed_messages, skipped_duplicates)
 
@@ -498,6 +471,26 @@ class SimpleChannelLeechCoordinator(TaskListener):
             LOGGER.error(f"[cleech] Processing error: {e}", exc_info=True)
             await self._save_progress(interrupted=True)
             raise
+
+    # 🔧 SIMPLIFIED: Callback-based completion waiting (no polling!)
+    async def _wait_for_completion_callback_mode(self):
+        """Wait for completion using TaskListener callbacks - no database polling!"""
+        LOGGER.info(f"[CLEECH-WAIT] Starting callback-based completion monitoring")
+        
+        while (self.our_active_links or self.pending_files) and not self.is_cancelled:
+            # Start new downloads if slots available
+            downloads_started = 0
+            while len(self.our_active_links) < self.max_concurrent and self.pending_files:
+                await self._start_next_download()
+                downloads_started += 1
+            
+            if downloads_started > 0:
+                LOGGER.info(f"[CLEECH-WAIT] Started {downloads_started} new downloads. Active: {len(self.our_active_links)}, Pending: {len(self.pending_files)}")
+            
+            # 🎯 LONGER SLEEP: Callbacks handle completion, we just keep alive
+            await asyncio.sleep(10)  # TaskListener callbacks handle everything!
+        
+        LOGGER.info(f"[CLEECH-WAIT] Completion monitoring finished - no more active or pending tasks")
 
     async def _restore_resume_state(self, scanner):
         try:
@@ -518,7 +511,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
                             'message_id': msg_id,
                             'file_info': file_info,
                         })
-                        # RESTORED: Add sanitized name to queue tracking
                         sanitized_name = self._generate_clean_filename(file_info)
                         self.pending_sanitized_names.add(sanitized_name)
                         if file_info.get('file_unique_id'):
@@ -556,7 +548,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 sanitized_name = self._generate_clean_filename(file_info)
                 file_unique_id = file_info.get('file_unique_id')
                 
-                # PRIORITY 1: Check database by sanitized filename (matching db_handler.py priority)
+                # PRIORITY 1: Check database by sanitized filename
                 if await database.check_file_exists(file_info=file_info):
                     skip_counts['existing'] += 1
                     continue
@@ -603,87 +595,25 @@ class SimpleChannelLeechCoordinator(TaskListener):
             clean_name = self._generate_clean_filename(file_item['file_info'])
             leech_cmd = f'/leech {file_item["url"]} -n {clean_name}'
             
+            LOGGER.info(f"[CLEECH-START] Starting download: {clean_name}")
             command_message = await user.send_message(chat_id=COMMAND_CHANNEL_ID, text=leech_cmd)
             actual_stored_url = f"https://t.me/c/{str(COMMAND_CHANNEL_ID)[4:]}/{command_message.id}"
             
             await asyncio.sleep(2)
             self.our_active_links.add(actual_stored_url)
             self.link_to_file_mapping[actual_stored_url] = file_item
+            LOGGER.info(f"[CLEECH-START] Download queued: {clean_name} -> {actual_stored_url}")
+            
         except Exception as e:
             LOGGER.error(f"[cleech] Error starting download for {file_item.get('filename')}: {e}", exc_info=True)
             self.pending_files.insert(0, file_item)
             
-            # IMPORTANT: Remove from tracking sets on failure to avoid permanent blocking
+            # Remove from tracking sets on failure
             sanitized_name = self._generate_clean_filename(file_item['file_info'])
             self.pending_sanitized_names.discard(sanitized_name)
             file_unique_id = file_item['file_info'].get('file_unique_id')
             if file_unique_id:
                 self.pending_file_ids.discard(file_unique_id)
-
-    async def _wait_for_completion(self):
-        while (self.our_active_links or self.pending_files) and not self.is_cancelled:
-            await self._check_and_verify_tasks()
-            while len(self.our_active_links) < self.max_concurrent and self.pending_files:
-                await self._start_next_download()
-            await asyncio.sleep(self.check_interval)
-
-    async def _check_and_verify_tasks(self):
-        try:
-            bot_token_first_half = config_dict['BOT_TOKEN'].split(':')[0]
-            active_db_tasks = set()
-            if await database._db.tasks[bot_token_first_half].find_one():
-                rows = database._db.tasks[bot_token_first_half].find({})
-                async for row in rows:
-                    active_db_tasks.add(row["_id"])
-            
-            potentially_completed_links = self.our_active_links - active_db_tasks
-            if not potentially_completed_links: 
-                return
-
-            verification_coros = [self._verify_upload_in_destination(link) for link in potentially_completed_links]
-            results = await asyncio.gather(*verification_coros)
-
-            for link, is_success in zip(list(potentially_completed_links), results):
-                self.our_active_links.discard(link)
-                file_item = self.link_to_file_mapping.pop(link, None)
-                if not file_item: 
-                    continue
-
-                # IMPORTANT: Remove from tracking sets when task completes
-                sanitized_name = self._generate_clean_filename(file_item['file_info'])
-                self.pending_sanitized_names.discard(sanitized_name)
-                file_unique_id = file_item['file_info'].get('file_unique_id')
-                if file_unique_id:
-                    self.pending_file_ids.discard(file_unique_id)
-
-                if is_success:
-                    self.completed_count += 1
-                    await database.add_file_entry(self.channel_chat_id, file_item['message_id'], file_item['file_info'])
-                    LOGGER.info(f"[cleech] Successfully completed: {file_item['filename']}")
-                else:
-                    self.failed_count += 1
-                    LOGGER.warning(f"[cleech] Verification failed for {file_item['filename']}. Marked as failed.")
-                await self._save_progress()
-
-        except Exception as e:
-            LOGGER.error(f"[cleech] CRITICAL ERROR in task completion check: {e}", exc_info=True)
-
-    async def _verify_upload_in_destination(self, completed_link):
-        file_item = self.link_to_file_mapping.get(completed_link)
-        if not file_item: 
-            return False
-        
-        # PRIMARY: Verification using sanitized name (matching watcher detection)
-        sanitized_name_to_check = self._generate_clean_filename(file_item['file_info'])
-        
-        for _ in range(3):
-            if self.watcher and self.watcher.is_verified(sanitized_name_to_check):
-                LOGGER.info(f"[cleech] VERIFIED upload for: {sanitized_name_to_check}")
-                return True
-            await asyncio.sleep(10)
-
-        LOGGER.warning(f"[cleech] FAILED verification for: {sanitized_name_to_check}. Not found in destination.")
-        return False
 
     async def _save_progress(self, interrupted=False):
         try:
@@ -755,6 +685,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
         LOGGER.info(f"Cancelling Channel Leech for {self.channel_id}")
         asyncio.create_task(self._save_progress(interrupted=True))
 
+# 🔧 UNCHANGED: Keep existing classes
 class ChannelScanListener(TaskListener):
     def __init__(self, client, message):
         self.client = client
