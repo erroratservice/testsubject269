@@ -106,7 +106,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
         self.check_interval = 10
         self.pending_files = []
         self.pending_file_ids = set()
-        self.pending_sanitized_names = set()
+        self.pending_sanitized_names = set()  # PRIMARY: Track sanitized names in queue
         self.our_active_links = set()
         self.completed_count = 0
         self.failed_count = 0
@@ -116,7 +116,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
         self.resume_mode = False
         self.resume_from_msg_id = None
         self.scanned_message_ids = set()
-        # REMOVED: self.last_success_msg_id - no longer needed
         self.start_time = datetime.now()
         self.watcher = None
         # Debugging variables
@@ -519,6 +518,11 @@ class SimpleChannelLeechCoordinator(TaskListener):
                             'message_id': msg_id,
                             'file_info': file_info,
                         })
+                        # RESTORED: Add sanitized name to queue tracking
+                        sanitized_name = self._generate_clean_filename(file_info)
+                        self.pending_sanitized_names.add(sanitized_name)
+                        if file_info.get('file_unique_id'):
+                            self.pending_file_ids.add(file_info['file_unique_id'])
                 except Exception as e:
                     LOGGER.warning(f"[cleech] Could not restore pending file {msg_id}: {e}")
             
@@ -548,16 +552,22 @@ class SimpleChannelLeechCoordinator(TaskListener):
                     skip_counts['filter'] += 1
                     continue
 
-                file_unique_id = file_info.get('file_unique_id')
+                # Generate sanitized filename (PRIMARY duplicate check method)
                 sanitized_name = self._generate_clean_filename(file_info)
+                file_unique_id = file_info.get('file_unique_id')
                 
-                # Check if file already exists in database
-                if await database.check_file_exists(file_unique_id=file_unique_id):
+                # PRIORITY 1: Check database by sanitized filename (matching db_handler.py priority)
+                if await database.check_file_exists(file_info=file_info):
                     skip_counts['existing'] += 1
                     continue
                     
-                # Check if already in processing queue
-                if sanitized_name in self.pending_sanitized_names or (file_unique_id and file_unique_id in self.pending_file_ids):
+                # PRIORITY 2: Check if already in processing queue (sanitized name first)
+                if sanitized_name in self.pending_sanitized_names:
+                    skip_counts['queued'] += 1
+                    continue
+                    
+                # PRIORITY 3: Check by file_unique_id in queue (secondary)
+                if file_unique_id and file_unique_id in self.pending_file_ids:
                     skip_counts['queued'] += 1
                     continue
                     
@@ -568,7 +578,10 @@ class SimpleChannelLeechCoordinator(TaskListener):
                     'message_id': message.id,
                     'file_info': file_info,
                 })
+                
+                # PRIMARY: Track sanitized name in queue
                 self.pending_sanitized_names.add(sanitized_name)
+                # SECONDARY: Track file_unique_id in queue
                 if file_unique_id:
                     self.pending_file_ids.add(file_unique_id)
                     
@@ -599,6 +612,13 @@ class SimpleChannelLeechCoordinator(TaskListener):
         except Exception as e:
             LOGGER.error(f"[cleech] Error starting download for {file_item.get('filename')}: {e}", exc_info=True)
             self.pending_files.insert(0, file_item)
+            
+            # IMPORTANT: Remove from tracking sets on failure to avoid permanent blocking
+            sanitized_name = self._generate_clean_filename(file_item['file_info'])
+            self.pending_sanitized_names.discard(sanitized_name)
+            file_unique_id = file_item['file_info'].get('file_unique_id')
+            if file_unique_id:
+                self.pending_file_ids.discard(file_unique_id)
 
     async def _wait_for_completion(self):
         while (self.our_active_links or self.pending_files) and not self.is_cancelled:
@@ -620,7 +640,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
             if not potentially_completed_links: 
                 return
 
-            LOGGER.info(f"[cleech] Verifying {len(potentially_completed_links)} potentially completed downloads")
             verification_coros = [self._verify_upload_in_destination(link) for link in potentially_completed_links]
             results = await asyncio.gather(*verification_coros)
 
@@ -630,9 +649,15 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 if not file_item: 
                     continue
 
+                # IMPORTANT: Remove from tracking sets when task completes
+                sanitized_name = self._generate_clean_filename(file_item['file_info'])
+                self.pending_sanitized_names.discard(sanitized_name)
+                file_unique_id = file_item['file_info'].get('file_unique_id')
+                if file_unique_id:
+                    self.pending_file_ids.discard(file_unique_id)
+
                 if is_success:
                     self.completed_count += 1
-                    # REMOVED: self.last_success_msg_id tracking - no longer needed
                     await database.add_file_entry(self.channel_chat_id, file_item['message_id'], file_item['file_info'])
                     LOGGER.info(f"[cleech] Successfully completed: {file_item['filename']}")
                 else:
@@ -648,6 +673,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
         if not file_item: 
             return False
         
+        # PRIMARY: Verification using sanitized name (matching watcher detection)
         sanitized_name_to_check = self._generate_clean_filename(file_item['file_info'])
         
         for _ in range(3):
@@ -666,7 +692,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 "channel_id": self.channel_id,
                 "filter_tags": self.filter_tags,
                 "scan_type": self.scan_type,
-                # REMOVED: "last_success_msg_id" - no longer needed
                 "scanned_message_ids": list(self.scanned_message_ids),
                 "pending_files": [f['message_id'] for f in self.pending_files] + [item['message_id'] for item in self.link_to_file_mapping.values()],
                 "timestamp": datetime.utcnow().isoformat(),
@@ -674,7 +699,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 "completed_scan_type": self.completed_scan_type
             }
             await database.save_leech_progress(self.message.from_user.id, self.channel_id, progress)
-            LOGGER.info(f"[cleech] Progress saved: completed={self.completed_count}, failed={self.failed_count}, pending={len(self.pending_files)}")
         except Exception as e:
             LOGGER.error(f"[cleech] Error saving progress: {e}")
 
