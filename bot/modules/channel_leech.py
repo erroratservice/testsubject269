@@ -262,8 +262,8 @@ class SimpleChannelLeechCoordinator(TaskListener):
 
     async def _coordinate_simple_leech(self):
         scanner = ChannelScanner(user, self.channel_id, filter_tags=self.filter_tags)
-        batch_size = 15  # REDUCED: From 30 to 15 to stay under rate limits
-        batch_sleep = 3   # INCREASED: From 2 to 3 seconds
+        batch_size = 20  # Reasonable batch size for processing
+        batch_sleep = 3   # Delay between batches
         processed_messages = 0
         skipped_duplicates = 0
         completion_task = None
@@ -280,11 +280,12 @@ class SimpleChannelLeechCoordinator(TaskListener):
         self.max_recovery_attempts = 3
         self.last_iteration_time = time.time()
         
-        # ENHANCED: Rate limit protection
-        request_count = 0
+        # CORRECTED: Dual rate limit protection
+        api_request_count = 0  # Track actual API requests (max 30 per 30s)
+        files_processed_count = 0  # Track processed files (max 300 per 30s) 
         last_rate_reset = time.time()
-        max_requests_per_30s = 300  # Stay under Telegram's 30 req/30s limit
-        iterator_timeout = 300  # 5 minutes timeout for iterator
+        max_api_requests_per_30s = 25  # Stay under Telegram's hard limit of 30
+        max_files_per_30s = 300  # Your setting to avoid overloading user session
 
         if self.resume_mode:
             await self._restore_resume_state(scanner)
@@ -342,11 +343,11 @@ class SimpleChannelLeechCoordinator(TaskListener):
             scanned_media_count = 0
             current_batch = []
             loop_iteration = 0
-            last_iterator_activity = time.time()
             
             LOGGER.info(f"[cleech] Beginning get_chat_history iteration with offset_id: {offset_id}")
+            LOGGER.info(f"[cleech] Rate limiting: API {max_api_requests_per_30s}/30s, Files {max_files_per_30s}/30s, batch size: {batch_size}")
             
-            # Timeout protected iteration with rate limiting
+            # Timeout protected iteration
             message_iterator = user.get_chat_history(
                 chat_id=self.channel_chat_id,
                 offset_id=offset_id
@@ -357,30 +358,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 current_time = time.time()
                 self.last_message_time = current_time
                 self.last_iteration_time = current_time
-                last_iterator_activity = current_time
-                
-                # ENHANCED: Rate limiting check
-                if current_time - last_rate_reset >= 30:
-                    # Reset rate limit counter every 30 seconds
-                    request_count = 0
-                    last_rate_reset = current_time
-                    LOGGER.info(f"[cleech] Rate limit window reset - processed {loop_iteration} messages so far")
-                
-                # Check if we're approaching rate limit
-                if request_count >= max_requests_per_30s:
-                    wait_time = 30 - (current_time - last_rate_reset)
-                    if wait_time > 0:
-                        LOGGER.warning(f"[cleech] Rate limit protection: waiting {wait_time:.1f}s before next batch")
-                        await self._safe_edit_message(self.status_message, 
-                            f"⏳ **Rate limit protection - waiting {wait_time:.0f}s**\n\n"
-                            f"**Processed:** {scanned_media_count}/{total_media_files}\n"
-                            f"**Active:** {len(self.our_active_links)}/{self.max_concurrent}"
-                        )
-                        await asyncio.sleep(wait_time + 1)
-                        request_count = 0
-                        last_rate_reset = time.time()
-                
-                request_count += 1
                 
                 # Enhanced debugging with timeout detection
                 if loop_iteration % 500 == 0:
@@ -406,18 +383,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
                         LOGGER.error(f"[cleech] Max recovery attempts exceeded, saving progress and stopping scan")
                         await self._save_progress(interrupted=True)
                         raise TimeoutError(f"Scan stalled at iteration {loop_iteration} after {self.max_recovery_attempts} recovery attempts")
-                
-                # Check for iterator timeout
-                iterator_idle = current_time - last_iterator_activity
-                if iterator_idle > iterator_timeout:
-                    LOGGER.error(f"[cleech] ITERATOR TIMEOUT: get_chat_history stalled for {iterator_timeout}s after message {message.id}")
-                    await self._safe_edit_message(self.status_message, 
-                        f"⚠️ **Telegram API slow - last message: {message.id}**\n\n"
-                        f"**Processed:** {scanned_media_count}/{total_media_files}\n"
-                        f"**Active:** {len(self.our_active_links)}/{self.max_concurrent} | **Pending:** {len(self.pending_files)}"
-                    )
-                    LOGGER.info(f"[cleech] Continuing to wait for next message batch from Telegram...")
-                    last_iterator_activity = current_time
                 
                 # Check for batch timeout
                 if current_time - self.last_batch_time > scan_timeout:
@@ -458,7 +423,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
                     LOGGER.info(f"[cleech] Starting completion check task during scan.")
                     completion_task = asyncio.create_task(self._wait_for_completion())
 
-                # Throttled status updates with timeout and rate limit info
+                # Throttled status updates with dual rate limit info
                 if current_time - last_status_update >= status_update_interval:
                     progress_percent = (scanned_media_count / total_media_files * 100) if total_media_files > 0 else 0
                     scan_type_text = f"{self.scan_type.title()}s" if self.scan_type else "Media files"
@@ -466,18 +431,52 @@ class SimpleChannelLeechCoordinator(TaskListener):
                     # Show rate and timeout status
                     elapsed_total = current_time - self.scan_start_time
                     overall_rate = scanned_media_count / elapsed_total if elapsed_total > 0 else 0
-                    rate_status = f" | Rate: {request_count}/{max_requests_per_30s}"
+                    rate_status = f"API: {api_request_count}/{max_api_requests_per_30s} | Files: {files_processed_count}/{max_files_per_30s}"
                     
                     await self._safe_edit_message(self.status_message, 
                         f"**Scanning {scan_type_text}... ({scanned_media_count}/{total_media_files} - {progress_percent:.1f}%)**\n\n"
-                        f"**Current Msg ID:** {message.id} | **Speed:** {overall_rate:.1f} files/s{rate_status}\n"
-                        f"**Active:** {len(self.our_active_links)}/{self.max_concurrent} | **Pending:** {len(self.pending_files)}\n"
+                        f"**Current Msg ID:** {message.id} | **Rate:** {overall_rate:.1f} files/s\n"
+                        f"**{rate_status}** | **Active:** {len(self.our_active_links)}/{self.max_concurrent} | **Pending:** {len(self.pending_files)}\n"
                         f"**Completed:** {self.completed_count} | **Failed:** {self.failed_count}"
                     )
                     last_status_update = current_time
 
                 if len(current_batch) >= batch_size:
-                    LOGGER.info(f"[cleech] Processing batch {request_count}/{max_requests_per_30s} in current window (current msg ID: {message.id})")
+                    current_time = time.time()
+                    
+                    # CORRECTED: Dual rate limiting check
+                    if current_time - last_rate_reset >= 30:
+                        # Reset both counters every 30 seconds
+                        api_request_count = 0
+                        files_processed_count = 0
+                        last_rate_reset = current_time
+                        LOGGER.info(f"[cleech] Rate limit window reset - API: {api_request_count}, Files: {files_processed_count}, Messages: {loop_iteration}")
+                    
+                    # Check both limits
+                    api_limit_hit = api_request_count >= max_api_requests_per_30s
+                    files_limit_hit = files_processed_count >= max_files_per_30s
+                    
+                    if api_limit_hit or files_limit_hit:
+                        wait_time = 30 - (current_time - last_rate_reset)
+                        if wait_time > 0:
+                            limit_type = "API requests" if api_limit_hit else "file processing"
+                            LOGGER.warning(f"[cleech] Rate limit protection ({limit_type}): waiting {wait_time:.1f}s")
+                            await self._safe_edit_message(self.status_message, 
+                                f"⏳ **Rate limit protection ({limit_type}) - waiting {wait_time:.0f}s**\n\n"
+                                f"**Processed:** {scanned_media_count}/{total_media_files}\n"
+                                f"**API:** {api_request_count}/{max_api_requests_per_30s} | **Files:** {files_processed_count}/{max_files_per_30s}\n"
+                                f"**Active:** {len(self.our_active_links)}/{self.max_concurrent} | **Pending:** {len(self.pending_files)}"
+                            )
+                            await asyncio.sleep(wait_time + 1)
+                            api_request_count = 0
+                            files_processed_count = 0
+                            last_rate_reset = time.time()
+                    
+                    # Increment counters
+                    api_request_count += 1  # This batch processing counts as 1 API request
+                    files_processed_count += len(current_batch)  # Count actual files processed
+                    
+                    LOGGER.info(f"[cleech] Processing batch - API: {api_request_count}/{max_api_requests_per_30s}, Files: {files_processed_count}/{max_files_per_30s} (msg ID: {message.id})")
                     self.last_batch_time = current_time
                     batch_skipped = await self._process_batch(current_batch, scanner, processed_messages)
                     skipped_duplicates += batch_skipped
@@ -485,7 +484,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
                     
                     # ENHANCED: Adaptive sleep based on rate limit status
                     sleep_time = batch_sleep
-                    if request_count > max_requests_per_30s * 0.8:  # Near rate limit
+                    if api_request_count > max_api_requests_per_30s * 0.8 or files_processed_count > max_files_per_30s * 0.8:
                         sleep_time = batch_sleep * 2
                         LOGGER.info(f"[cleech] Near rate limit - increased sleep to {sleep_time}s")
                     
@@ -529,7 +528,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
             await self._save_progress(interrupted=True)
             # Don't re-raise, let it complete normally with current progress
         except Exception as e:
-            LOGGER.error(f"[cleech] Processing error at iteration {loop_iteration}: {e}", exc_info=True)
+            LOGGER.error(f"[cleech] Processing error at iteration {getattr(locals(), 'loop_iteration', 0)}: {e}", exc_info=True)
             await self._save_progress(interrupted=True)
             raise
 
