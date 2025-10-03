@@ -262,8 +262,8 @@ class SimpleChannelLeechCoordinator(TaskListener):
 
     async def _coordinate_simple_leech(self):
         scanner = ChannelScanner(user, self.channel_id, filter_tags=self.filter_tags)
-        batch_size = 50  # Increased for better efficiency
-        batch_sleep = 3
+        batch_size = 100  # Increased for better efficiency
+        batch_sleep = 5
         processed_messages = 0
         skipped_duplicates = 0
         completion_task = None
