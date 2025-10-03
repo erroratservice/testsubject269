@@ -11,7 +11,7 @@ from ..telegram_helper.message_utils import edit_message
 LOGGER = logging.getLogger(__name__)
 
 class ChannelScanner:
-    def __init__(self, user_client, channel_id, batch_size=50, max_messages=0, filter_tags=None):
+    def __init__(self, user_client, channel_id, batch_size=100, max_messages=0, filter_tags=None):
         self.user_client = user_client
         self.channel_id = channel_id
         self.batch_size = batch_size
@@ -21,8 +21,8 @@ class ChannelScanner:
         self.processed = 0
         self.db_entries = 0
         self.status_message = None
-        self.batch_sleep = 2  # Sleep 2 seconds after each batch
-        self.message_sleep = 0.1  # Small delay between messages
+        self.batch_sleep = 5  # Sleep 2 seconds after each batch
+        self.message_sleep = 0.5  # Small delay between messages
         self.listener = None  # For cancellation support
 
     async def scan(self, status_msg=None):
