@@ -262,8 +262,8 @@ class SimpleChannelLeechCoordinator(TaskListener):
 
     async def _coordinate_simple_leech(self):
         scanner = ChannelScanner(user, self.channel_id, filter_tags=self.filter_tags)
-        batch_size = 20  # Reasonable batch size for processing
-        batch_sleep = 3   # Delay between batches
+        batch_size = 100  # Reasonable batch size for processing
+        batch_sleep = 5   # Delay between batches
         processed_messages = 0
         skipped_duplicates = 0
         completion_task = None
@@ -285,7 +285,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
         files_processed_count = 0  # Track processed files (max 300 per 30s) 
         last_rate_reset = time.time()
         max_api_requests_per_30s = 25  # Stay under Telegram's hard limit of 30
-        max_files_per_30s = 300  # Your setting to avoid overloading user session
+        max_files_per_30s = 500  # Your setting to avoid overloading user session
 
         if self.resume_mode:
             await self._restore_resume_state(scanner)
