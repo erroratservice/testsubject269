@@ -336,12 +336,9 @@ class TaskListener(TaskConfig):
                 folders=folders,
                 mime_type=mime_type
             )
-            LOGGER.info(f"[TASK-LISTENER] ✅ Notified channel leech coordinators: {self.name}")
         except ImportError:
-            # Channel leech module not available - normal operation
-            LOGGER.debug(f"[TASK-LISTENER] Channel leech module not available")
+            pass
         except Exception as e:
-            # Log but don't break existing functionality
             LOGGER.debug(f"[TASK-LISTENER] Channel leech notification error: {e}")
 
         if self.seed:
@@ -392,9 +389,8 @@ class TaskListener(TaskConfig):
                 link=self.message.link,
                 error=str(error)
             )
-            LOGGER.info(f"[TASK-LISTENER] ❌ Notified channel leech coordinators of failure: {self.name}")
         except ImportError:
-            LOGGER.debug(f"[TASK-LISTENER] Channel leech module not available")
+            pass
         except Exception as e:
             LOGGER.debug(f"[TASK-LISTENER] Channel leech failure notification error: {e}")
 
@@ -444,9 +440,8 @@ class TaskListener(TaskConfig):
                 link=self.message.link,
                 error=str(error)
             )
-            LOGGER.info(f"[TASK-LISTENER] ❌ Notified channel leech coordinators of upload failure: {self.name}")
         except ImportError:
-            LOGGER.debug(f"[TASK-LISTENER] Channel leech module not available")
+            pass
         except Exception as e:
             LOGGER.debug(f"[TASK-LISTENER] Channel leech upload failure notification error: {e}")
 
