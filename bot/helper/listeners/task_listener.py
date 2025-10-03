@@ -327,7 +327,7 @@ class TaskListener(TaskConfig):
         # 🔧 NEW: MINIMAL PATCH - Notify channel leech coordinators
         try:
             # Import here to avoid circular imports
-            from ..modules.channel_leech import SimpleChannelLeechCoordinator
+            from bot.modules.channel_leech import SimpleChannelLeechCoordinator
             await SimpleChannelLeechCoordinator.handle_task_completion(
                 link=self.message.link,
                 name=self.name,
@@ -387,7 +387,7 @@ class TaskListener(TaskConfig):
 
         # 🔧 NEW: MINIMAL PATCH - Notify channel leech coordinators of failure
         try:
-            from ..modules.channel_leech import SimpleChannelLeechCoordinator
+            from bot.modules.channel_leech import SimpleChannelLeechCoordinator
             await SimpleChannelLeechCoordinator.handle_task_failure(
                 link=self.message.link,
                 error=str(error)
@@ -439,7 +439,7 @@ class TaskListener(TaskConfig):
 
         # 🔧 NEW: MINIMAL PATCH - Notify channel leech coordinators of upload failure
         try:
-            from ..modules.channel_leech import SimpleChannelLeechCoordinator
+            from bot.modules.channel_leech import SimpleChannelLeechCoordinator
             await SimpleChannelLeechCoordinator.handle_task_failure(
                 link=self.message.link,
                 error=str(error)
