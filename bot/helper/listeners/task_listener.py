@@ -323,6 +323,27 @@ class TaskListener(TaskConfig):
                 msg += f"\n\nPath: <code>{rclone_path}</code>"
                 button = None
             await send_message(self.message, msg, button)
+
+        # 🔧 NEW: MINIMAL PATCH - Notify channel leech coordinators
+        try:
+            # Import here to avoid circular imports
+            from ..modules.channel_leech import SimpleChannelLeechCoordinator
+            await SimpleChannelLeechCoordinator.handle_task_completion(
+                link=self.message.link,
+                name=self.name,
+                size=self.size,
+                files=files,
+                folders=folders,
+                mime_type=mime_type
+            )
+            LOGGER.info(f"[TASK-LISTENER] ✅ Notified channel leech coordinators: {self.name}")
+        except ImportError:
+            # Channel leech module not available - normal operation
+            LOGGER.debug(f"[TASK-LISTENER] Channel leech module not available")
+        except Exception as e:
+            # Log but don't break existing functionality
+            LOGGER.debug(f"[TASK-LISTENER] Channel leech notification error: {e}")
+
         if self.seed:
             if self.new_dir:
                 await clean_target(self.new_dir)
@@ -364,6 +385,19 @@ class TaskListener(TaskConfig):
         ):
             await database.rm_complete_task(self.message.link)
 
+        # 🔧 NEW: MINIMAL PATCH - Notify channel leech coordinators of failure
+        try:
+            from ..modules.channel_leech import SimpleChannelLeechCoordinator
+            await SimpleChannelLeechCoordinator.handle_task_failure(
+                link=self.message.link,
+                error=str(error)
+            )
+            LOGGER.info(f"[TASK-LISTENER] ❌ Notified channel leech coordinators of failure: {self.name}")
+        except ImportError:
+            LOGGER.debug(f"[TASK-LISTENER] Channel leech module not available")
+        except Exception as e:
+            LOGGER.debug(f"[TASK-LISTENER] Channel leech failure notification error: {e}")
+
         if hasattr(self, 'is_channel_leech') and self.is_channel_leech:
             self.download_failed = True
 
@@ -402,6 +436,19 @@ class TaskListener(TaskConfig):
             and DATABASE_URL
         ):
             await database.rm_complete_task(self.message.link)
+
+        # 🔧 NEW: MINIMAL PATCH - Notify channel leech coordinators of upload failure
+        try:
+            from ..modules.channel_leech import SimpleChannelLeechCoordinator
+            await SimpleChannelLeechCoordinator.handle_task_failure(
+                link=self.message.link,
+                error=str(error)
+            )
+            LOGGER.info(f"[TASK-LISTENER] ❌ Notified channel leech coordinators of upload failure: {self.name}")
+        except ImportError:
+            LOGGER.debug(f"[TASK-LISTENER] Channel leech module not available")
+        except Exception as e:
+            LOGGER.debug(f"[TASK-LISTENER] Channel leech upload failure notification error: {e}")
 
         if hasattr(self, 'is_channel_leech') and self.is_channel_leech:
             self.upload_failed = True
