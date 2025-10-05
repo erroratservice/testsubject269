@@ -78,6 +78,11 @@ class SimpleChannelLeechCoordinator(TaskListener):
         self.scanned_message_ids = set()
         self.start_time = datetime.now()
         
+        # NEW: Message range support
+        self.from_msg_id = None
+        self.to_msg_id = None
+        self.scan_direction = 'newest_to_oldest'  # Default
+        
         # Unique coordinator ID for memory management
         SimpleChannelLeechCoordinator._coordinator_counter += 1
         self._coordinator_id = f"{message.from_user.id}_{self.channel_id}_{SimpleChannelLeechCoordinator._coordinator_counter}"
@@ -139,6 +144,76 @@ class SimpleChannelLeechCoordinator(TaskListener):
         if self._is_active:
             self._active_coordinators.pop(self._coordinator_id, None)
             self._is_active = False
+
+    def _determine_scan_direction(self):
+        """Determine scan direction based on from/to message IDs"""
+        if not self.from_msg_id and not self.to_msg_id:
+            return 'newest_to_oldest'  # Default behavior
+        
+        if self.from_msg_id and self.to_msg_id:
+            if self.from_msg_id > self.to_msg_id:
+                return 'newest_to_oldest'  # from=newer, to=older
+            else:
+                return 'oldest_to_newest'  # from=older, to=newer
+        
+        if self.from_msg_id:
+            return 'from_specified'  # Start from specific message, go to oldest
+        
+        if self.to_msg_id:
+            return 'to_specified'  # Start from newest, go to specified message
+        
+        return 'newest_to_oldest'
+
+    def _get_range_description(self):
+        """Get human-readable description of scan range"""
+        if not self.from_msg_id and not self.to_msg_id:
+            return " Full channel (newest → oldest)"
+        
+        if self.from_msg_id and self.to_msg_id:
+            direction = "→ oldest" if self.from_msg_id > self.to_msg_id else "→ newest"
+            return f" Messages {min(self.from_msg_id, self.to_msg_id)} to {max(self.from_msg_id, self.to_msg_id)} ({direction})"
+        
+        if self.from_msg_id:
+            return f" From message {self.from_msg_id} → oldest"
+        
+        if self.to_msg_id:
+            return f" Newest → message {self.to_msg_id}"
+        
+        return " Full channel"
+
+    def _should_process_message(self, message):
+        """Check if message is within specified range"""
+        msg_id = message.id
+        
+        if self.from_msg_id and self.to_msg_id:
+            # Range specified: check if message is within bounds
+            min_id = min(self.from_msg_id, self.to_msg_id)
+            max_id = max(self.from_msg_id, self.to_msg_id)
+            return min_id <= msg_id <= max_id
+        
+        if self.from_msg_id:
+            # Only from specified: process messages <= from_msg_id
+            return msg_id <= self.from_msg_id
+        
+        if self.to_msg_id:
+            # Only to specified: process messages >= to_msg_id
+            return msg_id >= self.to_msg_id
+        
+        # No range specified: process all messages
+        return True
+
+    def _get_scan_offset_and_limit(self):
+        """Get appropriate offset_id for Pyrogram get_chat_history"""
+        if self.scan_direction == 'oldest_to_newest':
+            # For oldest to newest, we need to start from the older message
+            if self.from_msg_id and self.to_msg_id:
+                return min(self.from_msg_id, self.to_msg_id) - 1
+            return 0  # Start from very beginning
+        else:
+            # For newest to oldest (default)
+            if self.from_msg_id:
+                return self.from_msg_id
+            return self.resume_from_msg_id if self.resume_from_msg_id > 0 else 0
 
     async def _handle_our_task_completion(self, link, name, size, files, folders, mime_type):
         """Handle completion of our tracked task - called by TaskListener callback"""
@@ -218,11 +293,18 @@ class SimpleChannelLeechCoordinator(TaskListener):
         args = self._parse_arguments(text[1:])
         if 'channel' not in args:
             usage_text = (
-                "**Usage:** `/cleech -ch <channel_id> [-f filter_text] [--no-caption] [-type document|media]`\n\n"
+                "**Usage:** `/cleech -ch <channel_id> [-f filter_text] [--no-caption] [-type document|media] [-from msg_id] [-to msg_id]`\n\n"
                 "**Examples:**\n"
                 "`/cleech -ch @movies_channel`\n"
                 "`/cleech -ch @movies_channel -f 2024 BluRay`\n"
-                "`/cleech -ch @docs_channel -type document`"
+                "`/cleech -ch @docs_channel -type document`\n"
+                "`/cleech -ch @channel -from 321546 -to 317845`\n"
+                "`/cleech -ch @channel -f PRT -from 100000`\n\n"
+                "**Message Range:**\n"
+                "• `-from <msg_id>` - Start from specific message ID\n"
+                "• `-to <msg_id>` - End at specific message ID\n"
+                "• Without range: Scans newest → oldest (default)\n"
+                "• With range: Auto-determines direction based on from/to values"
             )
             await send_message(self.message, usage_text)
             return
@@ -231,6 +313,11 @@ class SimpleChannelLeechCoordinator(TaskListener):
         self.filter_tags = args.get('filter', [])
         self.use_caption_as_filename = not args.get('no_caption', False)
         self.scan_type = args.get('type')
+        
+        # NEW: Message range support
+        self.from_msg_id = args.get('from_msg_id')
+        self.to_msg_id = args.get('to_msg_id')
+        self.scan_direction = self._determine_scan_direction()
 
         # Register coordinator safely
         self._register_coordinator()
@@ -270,14 +357,18 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 self.message.from_user.id, self.channel_id, "simple_channel_leech"
             )
 
+            # Enhanced status message with range info
             filter_text = f" with filter: `{' '.join(self.filter_tags)}`" if self.filter_tags else ""
             scan_type_text = f" of type `{self.scan_type}`" if self.scan_type else " of all media types"
+            range_text = self._get_range_description()
+            
             self.status_message = await send_message(
                 self.message,
                 f"**Channel Leech Starting{' (Resumed)' if self.resume_mode else ''}...**\n"
                 f"**Channel:** `{self.channel_id}`\n"
                 f"**Scanning:**{scan_type_text}\n"
-                f"**Filter:**{filter_text}"
+                f"**Filter:**{filter_text}\n"
+                f"**Range:**{range_text}"
             )
 
             try:
@@ -362,7 +453,8 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 scan_totals[scan['name']] = 0
 
         try:
-            offset_id = self.resume_from_msg_id if self.resume_from_msg_id > 0 else 0
+            # Enhanced offset calculation based on range
+            offset_id = self._get_scan_offset_and_limit()
             
             if self.resume_mode:
                 if self.resume_from_msg_id > 0:
@@ -372,14 +464,16 @@ class SimpleChannelLeechCoordinator(TaskListener):
                     await self._safe_edit_message(self.status_message, 
                         f"**🔄 Starting fresh scan from newest message...**")
             else:
+                range_desc = self._get_range_description()
                 await self._safe_edit_message(self.status_message, 
-                    f"**🚀 Starting new scan from newest message...**")
+                    f"**🚀 Starting scan{range_desc}...**")
             
             total_media_files = sum(scan_totals.values())
             scanned_media_count = 0
             current_batch = []
             loop_iteration = 0
             
+            # Standard message iterator (newest to oldest is default)
             message_iterator = user.get_chat_history(
                 chat_id=self.channel_chat_id,
                 offset_id=offset_id
@@ -391,10 +485,19 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 self.last_message_time = current_time
                 self.last_iteration_time = current_time
                 
+                # Check if message is within our range
+                if not self._should_process_message(message):
+                    continue
+                
+                # Stop if we've reached the end message ID for newest_to_oldest
+                if self.to_msg_id and self.scan_direction in ['newest_to_oldest', 'to_specified'] and message.id <= self.to_msg_id:
+                    LOGGER.info(f"[cleech] Reached end message ID {self.to_msg_id}, stopping scan")
+                    break
+                
                 if loop_iteration % 2000 == 0:
                     elapsed = current_time - self.scan_start_time
                     rate = loop_iteration / elapsed if elapsed > 0 else 0
-                    LOGGER.info(f"[cleech] Milestone: {loop_iteration} messages scanned in {elapsed:.1f}s (rate: {rate:.1f} msg/s)")
+                    LOGGER.info(f"[cleech] Milestone: {loop_iteration} messages scanned in {elapsed:.1f}s (rate: {rate:.1f} msg/s) | Current ID: {message.id}")
                 
                 # Check for iteration timeout
                 iteration_idle = current_time - self.last_iteration_time
@@ -778,6 +881,14 @@ class SimpleChannelLeechCoordinator(TaskListener):
             elif args[i] == '-type':
                 if i + 1 < len(args) and args[i+1].lower() in ['document', 'media']:
                     parsed['type'] = args[i+1].lower()
+                i+=2
+            elif args[i] == '-from':
+                if i + 1 < len(args) and args[i+1].isdigit():
+                    parsed['from_msg_id'] = int(args[i+1])
+                i+=2
+            elif args[i] == '-to':
+                if i + 1 < len(args) and args[i+1].isdigit():
+                    parsed['to_msg_id'] = int(args[i+1])
                 i+=2
             else:
                 i+=1
