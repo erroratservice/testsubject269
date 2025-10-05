@@ -298,293 +298,293 @@ class SimpleChannelLeechCoordinator(TaskListener):
             # Always unregister coordinator
             self._unregister_coordinator()
 
-async def _coordinate_simple_leech(self):
-    scanner = ChannelScanner(user, self.channel_id, filter_tags=self.filter_tags)
-    batch_size = 100
-    batch_sleep = 5
-    processed_messages = 0
-    skipped_duplicates = 0
-    completion_task = None
-    
-    # Throttling variables
-    last_status_update = 0
-    status_update_interval = 10
-    
-    # Enhanced debugging and timeout protection
-    scan_timeout = 300
-    self.scan_start_time = time.time()
-    self.iteration_timeout = 60
-    self.stuck_recovery_attempts = 0
-    self.max_recovery_attempts = 3
-    self.last_iteration_time = time.time()
-    
-    # Rate limit protection
-    api_request_count = 0
-    files_processed_count = 0
-    last_rate_reset = time.time()
-    max_api_requests_per_30s = 25
-    max_files_per_30s = 500
-    
-    # Track skipped files for status
-    skipped_filter_mismatch = 0
-    skipped_existing_files = 0
-    skipped_duplicates_in_queue = 0
-
-    if self.resume_mode:
-        await self._restore_resume_state(scanner)
-        while len(self.our_active_links) < self.max_concurrent and self.pending_files:
-            await self._start_next_download()
-    
-    # Start callback-based completion monitoring
-    if self.our_active_links or self.pending_files:
-        completion_task = asyncio.create_task(self._wait_for_completion_callback_mode())
-        LOGGER.info(f"[cleech-debug] Started completion monitoring task: Active={len(self.our_active_links)}, Pending={len(self.pending_files)}")
-
-    # Get total counts for progress display
-    scan_totals = {}
-    scan_types = []
-    if self.scan_type == 'document':
-        scan_types.append({'name': 'document', 'filter': enums.MessagesFilter.DOCUMENT})
-    elif self.scan_type == 'media':
-        scan_types.append({'name': 'media', 'filter': enums.MessagesFilter.VIDEO})
-    else:
-        scan_types.append({'name': 'document', 'filter': enums.MessagesFilter.DOCUMENT})
-        scan_types.append({'name': 'media', 'filter': enums.MessagesFilter.VIDEO})
-
-    for scan in scan_types:
-        try:
-            total_count = await user.search_messages_count(
-                chat_id=self.channel_chat_id,
-                filter=scan['filter']
-            )
-            scan_totals[scan['name']] = total_count
-        except Exception as e:
-            scan_totals[scan['name']] = 0
-
-    try:
-        offset_id = self.resume_from_msg_id if self.resume_from_msg_id > 0 else 0
+    async def _coordinate_simple_leech(self):
+        scanner = ChannelScanner(user, self.channel_id, filter_tags=self.filter_tags)
+        batch_size = 100
+        batch_sleep = 5
+        processed_messages = 0
+        skipped_duplicates = 0
+        completion_task = None
         
+        # Throttling variables
+        last_status_update = 0
+        status_update_interval = 10
+        
+        # Enhanced debugging and timeout protection
+        scan_timeout = 300
+        self.scan_start_time = time.time()
+        self.iteration_timeout = 60
+        self.stuck_recovery_attempts = 0
+        self.max_recovery_attempts = 3
+        self.last_iteration_time = time.time()
+        
+        # Rate limit protection
+        api_request_count = 0
+        files_processed_count = 0
+        last_rate_reset = time.time()
+        max_api_requests_per_30s = 25
+        max_files_per_30s = 500
+        
+        # Track skipped files for status
+        skipped_filter_mismatch = 0
+        skipped_existing_files = 0
+        skipped_duplicates_in_queue = 0
+
         if self.resume_mode:
-            if self.resume_from_msg_id > 0:
-                await self._safe_edit_message(self.status_message, 
-                    f"**📋 Resuming scan from message {offset_id}...**")
+            await self._restore_resume_state(scanner)
+            while len(self.our_active_links) < self.max_concurrent and self.pending_files:
+                await self._start_next_download()
+        
+        # Start callback-based completion monitoring
+        if self.our_active_links or self.pending_files:
+            completion_task = asyncio.create_task(self._wait_for_completion_callback_mode())
+            LOGGER.info(f"[cleech-debug] Started completion monitoring task: Active={len(self.our_active_links)}, Pending={len(self.pending_files)}")
+
+        # Get total counts for progress display
+        scan_totals = {}
+        scan_types = []
+        if self.scan_type == 'document':
+            scan_types.append({'name': 'document', 'filter': enums.MessagesFilter.DOCUMENT})
+        elif self.scan_type == 'media':
+            scan_types.append({'name': 'media', 'filter': enums.MessagesFilter.VIDEO})
+        else:
+            scan_types.append({'name': 'document', 'filter': enums.MessagesFilter.DOCUMENT})
+            scan_types.append({'name': 'media', 'filter': enums.MessagesFilter.VIDEO})
+
+        for scan in scan_types:
+            try:
+                total_count = await user.search_messages_count(
+                    chat_id=self.channel_chat_id,
+                    filter=scan['filter']
+                )
+                scan_totals[scan['name']] = total_count
+            except Exception as e:
+                scan_totals[scan['name']] = 0
+
+        try:
+            offset_id = self.resume_from_msg_id if self.resume_from_msg_id > 0 else 0
+            
+            if self.resume_mode:
+                if self.resume_from_msg_id > 0:
+                    await self._safe_edit_message(self.status_message, 
+                        f"**📋 Resuming scan from message {offset_id}...**")
+                else:
+                    await self._safe_edit_message(self.status_message, 
+                        f"**🔄 Starting fresh scan from newest message...**")
             else:
                 await self._safe_edit_message(self.status_message, 
-                    f"**🔄 Starting fresh scan from newest message...**")
-        else:
-            await self._safe_edit_message(self.status_message, 
-                f"**🚀 Starting new scan from newest message...**")
-        
-        total_media_files = sum(scan_totals.values())
-        scanned_media_count = 0
-        current_batch = []
-        loop_iteration = 0
-        
-        message_iterator = user.get_chat_history(
-            chat_id=self.channel_chat_id,
-            offset_id=offset_id
-        )
-        
-        async for message in message_iterator:
-            loop_iteration += 1
-            current_time = time.time()
-            self.last_message_time = current_time
-            self.last_iteration_time = current_time
+                    f"**🚀 Starting new scan from newest message...**")
             
-            if loop_iteration % 2000 == 0:
-                elapsed = current_time - self.scan_start_time
-                rate = loop_iteration / elapsed if elapsed > 0 else 0
-                LOGGER.info(f"[cleech] Milestone: {loop_iteration} messages scanned in {elapsed:.1f}s (rate: {rate:.1f} msg/s)")
+            total_media_files = sum(scan_totals.values())
+            scanned_media_count = 0
+            current_batch = []
+            loop_iteration = 0
             
-            # Check for iteration timeout
-            iteration_idle = current_time - self.last_iteration_time
-            if iteration_idle > self.iteration_timeout:
-                LOGGER.error(f"[cleech] ITERATION TIMEOUT at message {loop_iteration}")
-                
-                if self.stuck_recovery_attempts < self.max_recovery_attempts:
-                    self.stuck_recovery_attempts += 1
-                    LOGGER.warning(f"[cleech] Recovery attempt {self.stuck_recovery_attempts}/{self.max_recovery_attempts}")
-                    await asyncio.sleep(10)
-                    self.last_iteration_time = time.time()
-                    continue
-                else:
-                    await self._save_progress(interrupted=True)
-                    raise TimeoutError(f"Scan stalled at iteration {loop_iteration}")
+            message_iterator = user.get_chat_history(
+                chat_id=self.channel_chat_id,
+                offset_id=offset_id
+            )
             
-            if self.is_cancelled:
-                break
-            
-            # IMMEDIATE FILTER: Only process media messages
-            if not (message.document or message.video):
-                continue
-            
-            # Respect resumed scan type
-            if self.scan_type == 'document' and not message.document:
-                continue
-            elif self.scan_type == 'media' and not message.video:
-                continue
-            
-            scanned_media_count += 1
-            processed_messages += 1
-            current_batch.append(message)
-            self.scanned_message_ids.add(message.id)
-            self.stuck_recovery_attempts = 0
-            
-            # Track processing rate
-            if current_time - self.last_minute_check >= 60:
-                self.messages_processed_this_minute = 0
-                self.last_minute_check = current_time
-            self.messages_processed_this_minute += 1
-
-            if completion_task is None and (self.our_active_links or self.pending_files):
-                completion_task = asyncio.create_task(self._wait_for_completion_callback_mode())
-                LOGGER.info(f"[cleech-debug] Started completion monitoring during scan: Active={len(self.our_active_links)}, Pending={len(self.pending_files)}")
-
-            # Enhanced status updates with skipped file details
-            if current_time - last_status_update >= status_update_interval:
-                progress_percent = (scanned_media_count / total_media_files * 100) if total_media_files > 0 else 0
-                scan_type_text = f"{self.scan_type.title()}s" if self.scan_type else "Media files"
-                
-                elapsed_total = current_time - self.scan_start_time
-                overall_rate = scanned_media_count / elapsed_total if elapsed_total > 0 else 0
-                
-                total_skipped = skipped_filter_mismatch + skipped_existing_files + skipped_duplicates_in_queue
-                
-                await self._safe_edit_message(self.status_message, 
-                    f"**Scanning {scan_type_text}... ({scanned_media_count}/{total_media_files} - {progress_percent:.1f}%)**\n\n"
-                    f"**Current Msg ID:** {message.id} | **Rate:** {overall_rate:.1f} files/s\n"
-                    f"**Skipped:** {total_skipped} (**Filter:** {skipped_filter_mismatch} | **Existing:** {skipped_existing_files} | **Queued:** {skipped_duplicates_in_queue})\n"
-                    f"**Active:** {len(self.our_active_links)}/{self.max_concurrent} | **Pending:** {len(self.pending_files)}\n"
-                    f"**Completed:** {self.completed_count} | **Failed:** {self.failed_count}"
-                )
-                last_status_update = current_time
-
-            if len(current_batch) >= batch_size:
+            async for message in message_iterator:
+                loop_iteration += 1
                 current_time = time.time()
+                self.last_message_time = current_time
+                self.last_iteration_time = current_time
                 
-                # Rate limiting check
-                if current_time - last_rate_reset >= 30:
-                    api_request_count = 0
-                    files_processed_count = 0
-                    last_rate_reset = current_time
+                if loop_iteration % 2000 == 0:
+                    elapsed = current_time - self.scan_start_time
+                    rate = loop_iteration / elapsed if elapsed > 0 else 0
+                    LOGGER.info(f"[cleech] Milestone: {loop_iteration} messages scanned in {elapsed:.1f}s (rate: {rate:.1f} msg/s)")
                 
-                api_limit_hit = api_request_count >= max_api_requests_per_30s
-                files_limit_hit = files_processed_count >= max_files_per_30s
+                # Check for iteration timeout
+                iteration_idle = current_time - self.last_iteration_time
+                if iteration_idle > self.iteration_timeout:
+                    LOGGER.error(f"[cleech] ITERATION TIMEOUT at message {loop_iteration}")
+                    
+                    if self.stuck_recovery_attempts < self.max_recovery_attempts:
+                        self.stuck_recovery_attempts += 1
+                        LOGGER.warning(f"[cleech] Recovery attempt {self.stuck_recovery_attempts}/{self.max_recovery_attempts}")
+                        await asyncio.sleep(10)
+                        self.last_iteration_time = time.time()
+                        continue
+                    else:
+                        await self._save_progress(interrupted=True)
+                        raise TimeoutError(f"Scan stalled at iteration {loop_iteration}")
                 
-                if api_limit_hit or files_limit_hit:
-                    wait_time = 30 - (current_time - last_rate_reset)
-                    if wait_time > 0:
-                        await self._safe_edit_message(self.status_message, 
-                            f"⏳ **Rate limit protection - waiting {wait_time:.0f}s**\n\n"
-                            f"**Processed:** {scanned_media_count}/{total_media_files}"
-                        )
-                        await asyncio.sleep(wait_time + 1)
+                if self.is_cancelled:
+                    break
+                
+                # IMMEDIATE FILTER: Only process media messages
+                if not (message.document or message.video):
+                    continue
+                
+                # Respect resumed scan type
+                if self.scan_type == 'document' and not message.document:
+                    continue
+                elif self.scan_type == 'media' and not message.video:
+                    continue
+                
+                scanned_media_count += 1
+                processed_messages += 1
+                current_batch.append(message)
+                self.scanned_message_ids.add(message.id)
+                self.stuck_recovery_attempts = 0
+                
+                # Track processing rate
+                if current_time - self.last_minute_check >= 60:
+                    self.messages_processed_this_minute = 0
+                    self.last_minute_check = current_time
+                self.messages_processed_this_minute += 1
+
+                if completion_task is None and (self.our_active_links or self.pending_files):
+                    completion_task = asyncio.create_task(self._wait_for_completion_callback_mode())
+                    LOGGER.info(f"[cleech-debug] Started completion monitoring during scan: Active={len(self.our_active_links)}, Pending={len(self.pending_files)}")
+
+                # Enhanced status updates with skipped file details
+                if current_time - last_status_update >= status_update_interval:
+                    progress_percent = (scanned_media_count / total_media_files * 100) if total_media_files > 0 else 0
+                    scan_type_text = f"{self.scan_type.title()}s" if self.scan_type else "Media files"
+                    
+                    elapsed_total = current_time - self.scan_start_time
+                    overall_rate = scanned_media_count / elapsed_total if elapsed_total > 0 else 0
+                    
+                    total_skipped = skipped_filter_mismatch + skipped_existing_files + skipped_duplicates_in_queue
+                    
+                    await self._safe_edit_message(self.status_message, 
+                        f"**Scanning {scan_type_text}... ({scanned_media_count}/{total_media_files} - {progress_percent:.1f}%)**\n\n"
+                        f"**Current Msg ID:** {message.id} | **Rate:** {overall_rate:.1f} files/s\n"
+                        f"**Skipped:** {total_skipped} (**Filter:** {skipped_filter_mismatch} | **Existing:** {skipped_existing_files} | **Queued:** {skipped_duplicates_in_queue})\n"
+                        f"**Active:** {len(self.our_active_links)}/{self.max_concurrent} | **Pending:** {len(self.pending_files)}\n"
+                        f"**Completed:** {self.completed_count} | **Failed:** {self.failed_count}"
+                    )
+                    last_status_update = current_time
+
+                if len(current_batch) >= batch_size:
+                    current_time = time.time()
+                    
+                    # Rate limiting check
+                    if current_time - last_rate_reset >= 30:
                         api_request_count = 0
                         files_processed_count = 0
-                        last_rate_reset = time.time()
-                
-                api_request_count += 1
-                files_processed_count += len(current_batch)
-                
-                self.last_batch_time = current_time
+                        last_rate_reset = current_time
+                    
+                    api_limit_hit = api_request_count >= max_api_requests_per_30s
+                    files_limit_hit = files_processed_count >= max_files_per_30s
+                    
+                    if api_limit_hit or files_limit_hit:
+                        wait_time = 30 - (current_time - last_rate_reset)
+                        if wait_time > 0:
+                            await self._safe_edit_message(self.status_message, 
+                                f"⏳ **Rate limit protection - waiting {wait_time:.0f}s**\n\n"
+                                f"**Processed:** {scanned_media_count}/{total_media_files}"
+                            )
+                            await asyncio.sleep(wait_time + 1)
+                            api_request_count = 0
+                            files_processed_count = 0
+                            last_rate_reset = time.time()
+                    
+                    api_request_count += 1
+                    files_processed_count += len(current_batch)
+                    
+                    self.last_batch_time = current_time
+                    batch_skip_counts = await self._process_batch_with_skip_tracking(current_batch, scanner, processed_messages)
+                    
+                    skipped_filter_mismatch += batch_skip_counts['filter']
+                    skipped_existing_files += batch_skip_counts['existing']
+                    skipped_duplicates_in_queue += batch_skip_counts['queued']
+                    
+                    current_batch = []
+                    
+                    sleep_time = batch_sleep
+                    if api_request_count > max_api_requests_per_30s * 0.8 or files_processed_count > max_files_per_30s * 0.8:
+                        sleep_time = batch_sleep * 2
+                    
+                    await asyncio.sleep(sleep_time)
+                    await self._save_progress()
+
+            # Process remaining batch
+            if current_batch and not self.is_cancelled:
                 batch_skip_counts = await self._process_batch_with_skip_tracking(current_batch, scanner, processed_messages)
-                
                 skipped_filter_mismatch += batch_skip_counts['filter']
                 skipped_existing_files += batch_skip_counts['existing']
                 skipped_duplicates_in_queue += batch_skip_counts['queued']
-                
-                current_batch = []
-                
-                sleep_time = batch_sleep
-                if api_request_count > max_api_requests_per_30s * 0.8 or files_processed_count > max_files_per_30s * 0.8:
-                    sleep_time = batch_sleep * 2
-                
-                await asyncio.sleep(sleep_time)
                 await self._save_progress()
-
-        # Process remaining batch
-        if current_batch and not self.is_cancelled:
-            batch_skip_counts = await self._process_batch_with_skip_tracking(current_batch, scanner, processed_messages)
-            skipped_filter_mismatch += batch_skip_counts['filter']
-            skipped_existing_files += batch_skip_counts['existing']
-            skipped_duplicates_in_queue += batch_skip_counts['queued']
+            
+            self.completed_scan_type = "all" if not self.scan_type else self.scan_type
             await self._save_progress()
-        
-        self.completed_scan_type = "all" if not self.scan_type else self.scan_type
-        await self._save_progress()
-        
-        scan_type_text = f"{self.scan_type.title()}s" if self.scan_type else "All media"
-        await self._safe_edit_message(self.status_message, 
-            f"**✅ {scan_type_text} scan completed! ({scanned_media_count}/{total_media_files})**\n\n"
-            f"**Active:** {len(self.our_active_links)}/{self.max_concurrent} | **Pending:** {len(self.pending_files)}\n"
-            f"**Completed:** {self.completed_count} | **Failed:** {self.failed_count}"
-        )
+            
+            scan_type_text = f"{self.scan_type.title()}s" if self.scan_type else "All media"
+            await self._safe_edit_message(self.status_message, 
+                f"**✅ {scan_type_text} scan completed! ({scanned_media_count}/{total_media_files})**\n\n"
+                f"**Active:** {len(self.our_active_links)}/{self.max_concurrent} | **Pending:** {len(self.pending_files)}\n"
+                f"**Completed:** {self.completed_count} | **Failed:** {self.failed_count}"
+            )
 
-        # 🔧 CRITICAL FIX: Always ensure all downloads complete - Don't rely on completion_task
-        LOGGER.info(f"[cleech-debug] Scan finished. Starting post-scan completion monitoring: Active={len(self.our_active_links)}, Pending={len(self.pending_files)}")
-        
-        # Cancel any existing completion task since we're handling it manually now
-        if completion_task and not completion_task.done():
-            LOGGER.info(f"[cleech-debug] Cancelling existing completion task")
-            completion_task.cancel()
-            try:
-                await completion_task
-            except asyncio.CancelledError:
-                pass
+            # 🔧 CRITICAL FIX: Always ensure all downloads complete - Don't rely on completion_task
+            LOGGER.info(f"[cleech-debug] Scan finished. Starting post-scan completion monitoring: Active={len(self.our_active_links)}, Pending={len(self.pending_files)}")
+            
+            # Cancel any existing completion task since we're handling it manually now
+            if completion_task and not completion_task.done():
+                LOGGER.info(f"[cleech-debug] Cancelling existing completion task")
+                completion_task.cancel()
+                try:
+                    await completion_task
+                except asyncio.CancelledError:
+                    pass
 
-        # FIXED: Manual completion monitoring - ensure ALL downloads finish
-        post_scan_iterations = 0
-        while (self.our_active_links or self.pending_files) and not self.is_cancelled:
-            post_scan_iterations += 1
+            # FIXED: Manual completion monitoring - ensure ALL downloads finish
+            post_scan_iterations = 0
+            while (self.our_active_links or self.pending_files) and not self.is_cancelled:
+                post_scan_iterations += 1
+                
+                # Start any remaining downloads
+                downloads_started = 0
+                while len(self.our_active_links) < self.max_concurrent and self.pending_files:
+                    await self._start_next_download()
+                    downloads_started += 1
+                
+                # Debug logging every 10 iterations (100 seconds)
+                if post_scan_iterations % 10 == 0 or downloads_started > 0:
+                    LOGGER.info(f"[cleech-debug] Post-scan iteration {post_scan_iterations}: Started {downloads_started} downloads. Active: {len(self.our_active_links)}, Pending: {len(self.pending_files)}, Completed: {self.completed_count}")
+                
+                # Update status periodically during post-scan downloads
+                if post_scan_iterations % 3 == 0:  # Every 30 seconds
+                    await self._safe_edit_message(self.status_message,
+                        f"**✅ Scan completed! Processing remaining downloads...**\n\n"
+                        f"**Active:** {len(self.our_active_links)}/{self.max_concurrent} | **Pending:** {len(self.pending_files)}\n"
+                        f"**Completed:** {self.completed_count} | **Failed:** {self.failed_count}\n"
+                        f"**Processing:** Iteration {post_scan_iterations}"
+                    )
+                
+                # Keep monitoring via TaskListener callbacks
+                await asyncio.sleep(10)
             
-            # Start any remaining downloads
-            downloads_started = 0
-            while len(self.our_active_links) < self.max_concurrent and self.pending_files:
-                await self._start_next_download()
-                downloads_started += 1
+            LOGGER.info(f"[cleech-debug] Post-scan completion finished after {post_scan_iterations} iterations. Active={len(self.our_active_links)}, Pending={len(self.pending_files)}")
             
-            # Debug logging every 10 iterations (100 seconds)
-            if post_scan_iterations % 10 == 0 or downloads_started > 0:
-                LOGGER.info(f"[cleech-debug] Post-scan iteration {post_scan_iterations}: Started {downloads_started} downloads. Active: {len(self.our_active_links)}, Pending: {len(self.pending_files)}, Completed: {self.completed_count}")
-            
-            # Update status periodically during post-scan downloads
-            if post_scan_iterations % 3 == 0:  # Every 30 seconds
-                await self._safe_edit_message(self.status_message,
-                    f"**✅ Scan completed! Processing remaining downloads...**\n\n"
-                    f"**Active:** {len(self.our_active_links)}/{self.max_concurrent} | **Pending:** {len(self.pending_files)}\n"
-                    f"**Completed:** {self.completed_count} | **Failed:** {self.failed_count}\n"
-                    f"**Processing:** Iteration {post_scan_iterations}"
-                )
-            
-            # Keep monitoring via TaskListener callbacks
-            await asyncio.sleep(10)
-        
-        LOGGER.info(f"[cleech-debug] Post-scan completion finished after {post_scan_iterations} iterations. Active={len(self.our_active_links)}, Pending={len(self.pending_files)}")
-        
-        await self._show_final_results(processed_messages, skipped_duplicates)
+            await self._show_final_results(processed_messages, skipped_duplicates)
 
-    except TimeoutError as e:
-        LOGGER.error(f"[cleech] Timeout error: {e}")
-        await self._safe_edit_message(self.status_message, f"❌ **Scan timeout: {str(e)}**")
-        await self._save_progress(interrupted=True)
-        
-        # Still try to complete remaining downloads on timeout
-        if self.our_active_links or self.pending_files:
-            LOGGER.info(f"[cleech-debug] Timeout occurred but continuing with remaining downloads: Active={len(self.our_active_links)}, Pending={len(self.pending_files)}")
-            await self._wait_for_completion_callback_mode()
+        except TimeoutError as e:
+            LOGGER.error(f"[cleech] Timeout error: {e}")
+            await self._safe_edit_message(self.status_message, f"❌ **Scan timeout: {str(e)}**")
+            await self._save_progress(interrupted=True)
             
-    except Exception as e:
-        LOGGER.error(f"[cleech] Processing error: {e}", exc_info=True)
-        await self._save_progress(interrupted=True)
-        raise
-    finally:
-        # Final cleanup
-        if completion_task and not completion_task.done():
-            completion_task.cancel()
-            try:
-                await completion_task
-            except asyncio.CancelledError:
-                pass
+            # Still try to complete remaining downloads on timeout
+            if self.our_active_links or self.pending_files:
+                LOGGER.info(f"[cleech-debug] Timeout occurred but continuing with remaining downloads: Active={len(self.our_active_links)}, Pending={len(self.pending_files)}")
+                await self._wait_for_completion_callback_mode()
+                
+        except Exception as e:
+            LOGGER.error(f"[cleech] Processing error: {e}", exc_info=True)
+            await self._save_progress(interrupted=True)
+            raise
+        finally:
+            # Final cleanup
+            if completion_task and not completion_task.done():
+                completion_task.cancel()
+                try:
+                    await completion_task
+                except asyncio.CancelledError:
+                    pass
 
     # Callback-based completion waiting (no polling!)
     async def _wait_for_completion_callback_mode(self):
