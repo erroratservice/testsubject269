@@ -57,6 +57,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
         self.channel_id = None
         self.channel_chat_id = None
         self.filter_tags = []
+        self.filter_mode = 'and'  # NEW: 'and' or 'or'
         self.scan_type = None
         self.completed_scan_type = None
         self.status_message = None
@@ -78,7 +79,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
         self.scanned_message_ids = set()
         self.start_time = datetime.now()
         
-        # NEW: Message range support
+        # Message range support
         self.from_msg_id = None
         self.to_msg_id = None
         self.scan_direction = 'newest_to_oldest'  # Default
@@ -180,6 +181,31 @@ class SimpleChannelLeechCoordinator(TaskListener):
             return f" Newest → message {self.to_msg_id}"
         
         return " Full channel"
+
+    def _get_filter_description(self):
+        """Get human-readable description of filter settings"""
+        if not self.filter_tags:
+            return " No filter"
+        
+        tags_text = ' '.join(self.filter_tags)
+        if self.filter_mode == 'or':
+            return f" ANY of: `{tags_text}` (OR mode)"
+        else:
+            return f" ALL of: `{tags_text}` (AND mode)"
+
+    def _check_filter_match(self, search_text):
+        """Enhanced filter matching with AND/OR logic"""
+        if not self.filter_tags:
+            return True  # No filter = match all
+        
+        search_text_lower = search_text.lower()
+        
+        if self.filter_mode == 'or':
+            # OR logic: Match if ANY tag is found
+            return any(tag.lower() in search_text_lower for tag in self.filter_tags)
+        else:
+            # AND logic: Match if ALL tags are found (existing behavior)
+            return all(tag.lower() in search_text_lower for tag in self.filter_tags)
 
     def _should_process_message(self, message):
         """Check if message is within specified range"""
@@ -293,13 +319,17 @@ class SimpleChannelLeechCoordinator(TaskListener):
         args = self._parse_arguments(text[1:])
         if 'channel' not in args:
             usage_text = (
-                "**Usage:** `/cleech -ch <channel_id> [-f filter_text] [--no-caption] [-type document|media] [-from msg_id] [-to msg_id]`\n\n"
+                "**Usage:** `/cleech -ch <channel_id> [-f filter_text] [-feither filter_text] [--no-caption] [-type document|media] [-from msg_id] [-to msg_id]`\n\n"
                 "**Examples:**\n"
                 "`/cleech -ch @movies_channel`\n"
-                "`/cleech -ch @movies_channel -f 2024 BluRay`\n"
-                "`/cleech -ch @docs_channel -type document`\n"
-                "`/cleech -ch @channel -from 321546 -to 317845`\n"
-                "`/cleech -ch @channel -f PRT -from 100000`\n\n"
+                "`/cleech -ch @movies_channel -f 2024 BluRay`  ← Must contain ALL words\n"
+                "`/cleech -ch @movies_channel -feither 2024 BluRay`  ← Must contain ANY word\n"
+                "`/cleech -ch @docs_channel -f PRT x265 -type document`\n"
+                "`/cleech -ch @channel -feither HEVC x264 -from 100000`\n\n"
+                "**Filter Options:**\n"
+                "• `-f <words>` - **AND filter**: Must contain ALL specified words\n"
+                "• `-feither <words>` - **OR filter**: Must contain ANY of the specified words\n"
+                "• Cannot use both `-f` and `-feither` together\n\n"
                 "**Message Range:**\n"
                 "• `-from <msg_id>` - Start from specific message ID\n"
                 "• `-to <msg_id>` - End at specific message ID\n"
@@ -309,12 +339,18 @@ class SimpleChannelLeechCoordinator(TaskListener):
             await send_message(self.message, usage_text)
             return
 
+        # Enhanced filter parsing
         self.channel_id = args['channel']
         self.filter_tags = args.get('filter', [])
+        self.filter_mode = args.get('filter_mode', 'and')
         self.use_caption_as_filename = not args.get('no_caption', False)
         self.scan_type = args.get('type')
         
-        # NEW: Message range support
+        # Validate filter usage
+        if not self.filter_tags:
+            self.filter_mode = 'and'  # Default if no filters
+        
+        # Message range support
         self.from_msg_id = args.get('from_msg_id')
         self.to_msg_id = args.get('to_msg_id')
         self.scan_direction = self._determine_scan_direction()
@@ -357,8 +393,8 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 self.message.from_user.id, self.channel_id, "simple_channel_leech"
             )
 
-            # Enhanced status message with range info
-            filter_text = f" with filter: `{' '.join(self.filter_tags)}`" if self.filter_tags else ""
+            # Enhanced status message with filter mode info
+            filter_text = self._get_filter_description()
             scan_type_text = f" of type `{self.scan_type}`" if self.scan_type else " of all media types"
             range_text = self._get_range_description()
             
@@ -747,8 +783,8 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 if not file_info:
                     continue
                 
-                # Check filter match
-                if self.filter_tags and not all(tag.lower() in file_info['search_text'].lower() for tag in self.filter_tags):
+                # ENHANCED: Check filter match with AND/OR logic
+                if not self._check_filter_match(file_info['search_text']):
                     skip_counts['filter'] += 1
                     continue
 
@@ -875,7 +911,14 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 parsed['channel'] = args[i+1]; i+=2
             elif args[i] == '-f':
                 text = args[i+1]
-                parsed['filter'] = text[1:-1].split() if text.startswith('"') else text.split(); i+=2
+                parsed['filter'] = text[1:-1].split() if text.startswith('"') else text.split()
+                parsed['filter_mode'] = 'and'  # Default AND mode for -f
+                i+=2
+            elif args[i] == '-feither':
+                text = args[i+1]
+                parsed['filter'] = text[1:-1].split() if text.startswith('"') else text.split()
+                parsed['filter_mode'] = 'or'   # OR mode for -feither
+                i+=2
             elif args[i] == '--no-caption':
                 parsed['no_caption'] = True; i+=1
             elif args[i] == '-type':
