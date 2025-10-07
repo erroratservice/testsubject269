@@ -193,6 +193,17 @@ class SimpleChannelLeechCoordinator(TaskListener):
         else:
             return f" ALL of: `{tags_text}` (AND mode)"
 
+    def _get_scan_filter_status(self):
+        """Get detailed filter status for scanning progress"""
+        if not self.filter_tags:
+            return "**Filter:** None (downloading all files)"
+        
+        tags_text = ' '.join(self.filter_tags)
+        if self.filter_mode == 'or':
+            return f"**Filter (OR):** Files containing ANY of: `{tags_text}`"
+        else:
+            return f"**Filter (AND):** Files containing ALL of: `{tags_text}`"    
+
     def _check_filter_match(self, search_text):
         """Enhanced filter matching with AND/OR logic"""
         if not self.filter_tags:
@@ -589,8 +600,12 @@ class SimpleChannelLeechCoordinator(TaskListener):
                     
                     total_skipped = skipped_filter_mismatch + skipped_existing_files + skipped_duplicates_in_queue
                     
+                    # Enhanced filter description for ongoing status
+                    filter_status = self._get_scan_filter_status()
+                    
                     await self._safe_edit_message(self.status_message, 
-                        f"**Scanning {scan_type_text}... ({scanned_media_count}/{total_media_files} - {progress_percent:.1f}%)**\n\n"
+                        f"**Scanning {scan_type_text}... ({scanned_media_count}/{total_media_files} - {progress_percent:.1f}%)**\n"
+                        f"{filter_status}\n\n"
                         f"**Current Msg ID:** {message.id} | **Rate:** {overall_rate:.1f} files/s\n"
                         f"**Skipped:** {total_skipped} (**Filter:** {skipped_filter_mismatch} | **Existing:** {skipped_existing_files} | **Queued:** {skipped_duplicates_in_queue})\n"
                         f"**Active:** {len(self.our_active_links)}/{self.max_concurrent} | **Pending:** {len(self.pending_files)}\n"
