@@ -19,6 +19,7 @@ from bot import (
 import logging
 
 LOGGER = logging.getLogger(__name__)
+
 def sanitize_filename(filename):
     """Clean filename sanitization matching channel_leech.py exactly - NO lowercase conversion"""
     if not filename:
@@ -46,7 +47,7 @@ def sanitize_filename(filename):
     filename = filename.replace(' ', '.')
     # Remove brackets and invalid chars
     filename = re.sub(r'[\[\]\(\)\{\}]', '', filename)
-    filename = re.sub(r'[<>:"/\\|?*]', '', filename)
+    filename = re.sub(r'[<>:"/\|?*]', '', filename)
     # Collapse multiple dots
     filename = re.sub(r'\.{2,}', '.', filename)
     # Strip leading/trailing dots
@@ -401,15 +402,73 @@ class DbManager:
         except Exception as e:
             LOGGER.error(f"Error clearing leech progress: {e}")
 
+    def _generate_sanitized_name(self, file_info, use_caption_as_filename=True):
+        """Generate sanitized filename using the same logic as channel_leech.py"""
+        original_filename = file_info.get('file_name', '')
+        base_name = original_filename
+        
+        # Use caption as filename if available and enabled (matching channel_leech logic)
+        if use_caption_as_filename and file_info.get('caption_first_line'):
+            base_name = file_info['caption_first_line'].strip()
+        
+        # Apply the same sanitization as in channel_leech.py
+        clean_base = sanitize_filename(base_name)
+        
+        # Add extension if missing
+        original_ext = os.path.splitext(original_filename)[1]
+        media_extensions = {'.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v',
+                            '.mp3', '.flac', '.wav', '.aac', '.m4a', '.ogg',
+                            '.zip', '.rar', '.7z', '.tar', '.gz'}
+                            
+        if original_ext.lower() in media_extensions and not clean_base.lower().endswith(original_ext.lower()):
+            clean_base += original_ext
+            
+        return clean_base
+
+    def _create_enhanced_search_text(self, file_info, sanitized_name):
+        """Create enhanced search text including both original and sanitized names"""
+        search_parts = []
+        
+        # Original filename (always include)
+        if file_info.get('file_name'):
+            search_parts.append(file_info['file_name'])
+        
+        # Sanitized filename (if different from original)
+        if sanitized_name and sanitized_name != file_info.get('file_name'):
+            search_parts.append(sanitized_name)
+        
+        # Caption (if available)
+        if file_info.get('caption_first_line'):
+            search_parts.append(file_info['caption_first_line'])
+        
+        # Full caption or message text (if available)
+        original_search_text = file_info.get('search_text', '')
+        if original_search_text and original_search_text not in search_parts:
+            search_parts.append(original_search_text)
+        
+        return ' '.join(filter(None, search_parts))
+
     async def add_catalog_entry(self, channel_id, message_id, file_info):
-        """Add message to channel catalog"""
+        """Add message to channel catalog with enhanced filename tracking"""
         try:
             catalog_id = f"{channel_id}_{message_id}"
+            
+            # Generate sanitized name for the catalog
+            sanitized_name = self._generate_sanitized_name(file_info)
+            
+            # Enhance search_text to include both original and sanitized names
+            enhanced_search_text = self._create_enhanced_search_text(file_info, sanitized_name)
+            
+            # Create enhanced file_info with sanitized name
+            enhanced_file_info = file_info.copy()
+            enhanced_file_info['sanitized_name'] = sanitized_name
+            enhanced_file_info['search_text'] = enhanced_search_text
+            
             catalog_entry = {
                 "_id": catalog_id,
                 "channel_id": channel_id,
                 "message_id": message_id,
-                "file_info": file_info,
+                "file_info": enhanced_file_info,
                 "message_date": datetime.utcnow().isoformat(),
                 "last_updated": datetime.utcnow().isoformat(),
                 "scan_version": 1
@@ -423,7 +482,7 @@ class DbManager:
             LOGGER.error(f"[DB] Error adding catalog entry: {e}")
 
     async def get_catalog_files(self, channel_id, filter_tags=None, filter_mode='and', scan_type=None, from_msg_id=None, to_msg_id=None):
-        """Get files from catalog with filters applied"""
+        """Get files from catalog with enhanced filtering using sanitized names"""
         try:
             query = {"channel_id": channel_id}
             
@@ -448,7 +507,7 @@ class DbManager:
             async for entry in cursor:
                 file_info = entry['file_info']
                 
-                # Apply filter tags
+                # Apply filter tags using ENHANCED search text
                 if filter_tags:
                     search_text = file_info.get('search_text', '').lower()
                     if filter_mode == 'or':
@@ -458,13 +517,16 @@ class DbManager:
                         if not all(tag.lower() in search_text for tag in filter_tags):
                             continue
                 
-                # Check if already downloaded
+                # Use sanitized name for duplicate checking and downloads
+                sanitized_name = file_info.get('sanitized_name', file_info.get('file_name', ''))
+                
+                # Check if already downloaded using the existing file_info (compatible with existing logic)
                 if not await self.check_file_exists(file_info=file_info):
                     matched_files.append({
                         'message_id': entry['message_id'],
                         'url': f"https://t.me/c/{str(channel_id)[4:]}/{entry['message_id']}",
-                        'filename': file_info['file_name'],
-                        'file_info': file_info
+                        'filename': sanitized_name,  # Use sanitized name for download
+                        'file_info': file_info  # Include enhanced file_info with sanitized_name
                     })
             
             return matched_files
