@@ -483,7 +483,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 offset_id=offset_id
             )
             
-            # THE MAGIC: Original scanning logic + catalog building
+            # THE MAGIC: Original scanning logic + catalog building + sanitized name support
             async for message in message_iterator:
                 loop_iteration += 1
                 current_time = time.time()
@@ -548,20 +548,22 @@ class SimpleChannelLeechCoordinator(TaskListener):
                     self.last_minute_check = current_time
                 self.messages_processed_this_minute += 1
                 
-                # NEW: Add to catalog while scanning (no extra time cost!)
+                # 🆕 ENHANCED: Add to catalog while scanning with sanitized name support
                 file_info = await scanner._extract_file_info(message)
                 if file_info:
+                    # CRITICAL: The database method now handles sanitized name generation
+                    # We just pass the original file_info and let the database enhance it
                     await database.add_catalog_entry(
                         self.channel_chat_id, 
                         message.id, 
-                        file_info
+                        file_info  # Database method will enhance this with sanitized_name
                     )
                     cataloged_count += 1
 
                 if completion_task is None and (self.our_active_links or self.pending_files):
                     completion_task = asyncio.create_task(self._wait_for_completion_callback_mode())
 
-                # ENHANCED: Status updates with catalog progress
+                # 🆕 ENHANCED: Status updates with catalog progress and filter info
                 if current_time - last_status_update >= status_update_interval:
                     progress_percent = (scanned_media_count / total_media_files * 100) if total_media_files > 0 else 0
                     scan_type_text = f"{self.scan_type.title()}s" if self.scan_type else "Media files"
@@ -708,6 +710,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
             LOGGER.error(f"[cleech] Processing error: {e}", exc_info=True)
             await self._save_progress(interrupted=True)
             raise
+
 
     async def _handle_our_task_completion(self, link, name, size, files, folders, mime_type):
         """Handle completion of our tracked task - called by TaskListener callback"""
