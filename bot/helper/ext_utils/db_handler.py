@@ -543,13 +543,17 @@ class DbManager:
             LOGGER.error(f"[DB] Error getting channel metadata: {e}")
             return None
 
-    async def update_channel_metadata(self, channel_id, latest_msg_id=None, total_cataloged=None, channel_username=None):
-        """Update channel metadata after scan"""
+    async def update_channel_metadata(self, channel_id, latest_msg_id=None, total_cataloged=None, channel_username=None, catalog_status='incomplete'):
+        """Update channel metadata after scan with completion status"""
         try:
             update_data = {
-                "last_full_scan": datetime.utcnow().isoformat(),
-                "last_incremental_scan": datetime.utcnow().isoformat()
+                "last_incremental_scan": datetime.utcnow().isoformat(),
+                "catalog_status": catalog_status  # Track completion status
             }
+            
+            # Only update full scan timestamp when catalog is complete
+            if catalog_status == 'complete':
+                update_data["last_full_scan"] = datetime.utcnow().isoformat()
             
             if latest_msg_id:
                 update_data["latest_message_id"] = latest_msg_id
