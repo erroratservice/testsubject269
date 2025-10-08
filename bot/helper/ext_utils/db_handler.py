@@ -16,7 +16,9 @@ from bot import (
     aria2_options,
     qbit_options,
 )
+import logging
 
+LOGGER = logging.getLogger(__name__)
 def sanitize_filename(filename):
     """Clean filename sanitization matching channel_leech.py exactly - NO lowercase conversion"""
     if not filename:
@@ -398,6 +400,127 @@ class DbManager:
             await self._db.leech_progress.delete_one({"_id": key})
         except Exception as e:
             LOGGER.error(f"Error clearing leech progress: {e}")
+
+    async def add_catalog_entry(self, channel_id, message_id, file_info):
+        """Add message to channel catalog"""
+        try:
+            catalog_id = f"{channel_id}_{message_id}"
+            catalog_entry = {
+                "_id": catalog_id,
+                "channel_id": channel_id,
+                "message_id": message_id,
+                "file_info": file_info,
+                "message_date": datetime.utcnow().isoformat(),
+                "last_updated": datetime.utcnow().isoformat(),
+                "scan_version": 1
+            }
+            await self._db.channel_catalog.replace_one(
+                {"_id": catalog_id}, 
+                catalog_entry, 
+                upsert=True
+            )
+        except Exception as e:
+            LOGGER.error(f"[DB] Error adding catalog entry: {e}")
+
+    async def get_catalog_files(self, channel_id, filter_tags=None, filter_mode='and', scan_type=None, from_msg_id=None, to_msg_id=None):
+        """Get files from catalog with filters applied"""
+        try:
+            query = {"channel_id": channel_id}
+            
+            # Apply message range filters
+            if from_msg_id or to_msg_id:
+                msg_range = {}
+                if from_msg_id:
+                    msg_range["$lte"] = from_msg_id
+                if to_msg_id:
+                    msg_range["$gte"] = to_msg_id
+                query["message_id"] = msg_range
+            
+            # Apply scan type filter
+            if scan_type == 'document':
+                query["file_info.mime_type"] = {"$regex": "^(application/|text/)"}
+            elif scan_type == 'media':
+                query["file_info.mime_type"] = {"$regex": "^video/"}
+            
+            cursor = self._db.channel_catalog.find(query).sort("message_id", -1)
+            
+            matched_files = []
+            async for entry in cursor:
+                file_info = entry['file_info']
+                
+                # Apply filter tags
+                if filter_tags:
+                    search_text = file_info.get('search_text', '').lower()
+                    if filter_mode == 'or':
+                        if not any(tag.lower() in search_text for tag in filter_tags):
+                            continue
+                    else:  # 'and' mode
+                        if not all(tag.lower() in search_text for tag in filter_tags):
+                            continue
+                
+                # Check if already downloaded
+                if not await self.check_file_exists(file_info=file_info):
+                    matched_files.append({
+                        'message_id': entry['message_id'],
+                        'url': f"https://t.me/c/{str(channel_id)[4:]}/{entry['message_id']}",
+                        'filename': file_info['file_name'],
+                        'file_info': file_info
+                    })
+            
+            return matched_files
+            
+        except Exception as e:
+            LOGGER.error(f"[DB] Error getting catalog files: {e}")
+            return []
+
+    async def get_channel_metadata(self, channel_id):
+        """Get channel scanning metadata"""
+        try:
+            return await self._db.channel_metadata.find_one({"_id": channel_id})
+        except Exception as e:
+            LOGGER.error(f"[DB] Error getting channel metadata: {e}")
+            return None
+
+    async def update_channel_metadata(self, channel_id, latest_msg_id=None, total_cataloged=None, channel_username=None):
+        """Update channel metadata after scan"""
+        try:
+            update_data = {
+                "last_full_scan": datetime.utcnow().isoformat(),
+                "last_incremental_scan": datetime.utcnow().isoformat()
+            }
+            
+            if latest_msg_id:
+                update_data["latest_message_id"] = latest_msg_id
+            if total_cataloged is not None:
+                update_data["total_messages_cataloged"] = total_cataloged
+            if channel_username:
+                update_data["channel_username"] = channel_username
+            
+            await self._db.channel_metadata.update_one(
+                {"_id": channel_id},
+                {"$set": update_data},
+                upsert=True
+            )
+        except Exception as e:
+            LOGGER.error(f"[DB] Error updating channel metadata: {e}")
+
+    async def get_catalog_stats(self, channel_id):
+        """Get catalog statistics for a channel"""
+        try:
+            pipeline = [
+                {"$match": {"channel_id": channel_id}},
+                {"$group": {
+                    "_id": "$channel_id",
+                    "total_files": {"$sum": 1},
+                    "latest_message": {"$max": "$message_id"},
+                    "oldest_message": {"$min": "$message_id"}
+                }}
+            ]
+            result = await self._db.channel_catalog.aggregate(pipeline).to_list(1)
+            return result[0] if result else None
+        except Exception as e:
+            LOGGER.error(f"[DB] Error getting catalog stats: {e}")
+            return None    
 
     @property
     def _return(self):  # Compatibility stub for existing code
