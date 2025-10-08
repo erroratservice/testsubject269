@@ -304,12 +304,15 @@ class SimpleChannelLeechCoordinator(TaskListener):
             self.pending_files = catalog_files
             total_found = len(catalog_files)
             
-            await self._safe_edit_message(self.status_message, 
-                f"**✅ Catalog loaded! Found {total_found} matching files**\n\n"
-                f"**Filter:** {self._get_filter_description()}\n"
-                f"**Range:** {self._get_range_description()}\n"
-                f"**Starting downloads...**"
-            )
+            if total_found == 0:
+                await self._safe_edit_message(self.status_message, 
+                    f"**✅ Catalog loaded! No matching files found**\n\n"
+                    f"**Filter:** {self._get_filter_description()}\n"
+                    f"**Range:** {self._get_range_description()}\n\n"
+                    f"**📥 All matching files already downloaded or filtered out**"
+                )
+                await self._show_final_results(0, 0)
+                return
             
             # Track files in our sets to prevent duplicates
             for file_item in self.pending_files:
@@ -323,9 +326,22 @@ class SimpleChannelLeechCoordinator(TaskListener):
             while len(self.our_active_links) < self.max_concurrent and self.pending_files:
                 await self._start_next_download()
             
-            # Monitor completion
+            # Show catalog completion status with pending downloads info
+            total_pending = len(self.our_active_links) + len(self.pending_files)
+            await self._safe_edit_message(self.status_message, 
+                f"**✅ Catalog loaded! Found {total_found} matching files**\n\n"
+                f"**Filter:** {self._get_filter_description()}\n"
+                f"**Range:** {self._get_range_description()}\n\n"
+                f"**📥 Downloads queued: {total_pending} files**\n"
+                f"**Active:** {len(self.our_active_links)}/{self.max_concurrent} | **Pending:** {len(self.pending_files)}\n"
+                f"**⏳ Waiting for queued processes to complete...**"
+            )
+            
+            # Wait for downloads to complete silently (NO status updates)
             await self._wait_for_completion_callback_mode()
-            await self._show_final_results(0, 0)  # No scanning stats needed
+            
+            # Only show final results when everything is done
+            await self._show_final_results(0, 0)
             
         except Exception as e:
             LOGGER.error(f"[cleech-catalog] Error processing from catalog: {e}")
@@ -548,7 +564,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
                     self.last_minute_check = current_time
                 self.messages_processed_this_minute += 1
                 
-                # 🆕 ENHANCED: Add to catalog while scanning with sanitized name support
+                # ENHANCED: Add to catalog while scanning with sanitized name support
                 file_info = await scanner._extract_file_info(message)
                 if file_info:
                     # CRITICAL: The database method now handles sanitized name generation
@@ -563,7 +579,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 if completion_task is None and (self.our_active_links or self.pending_files):
                     completion_task = asyncio.create_task(self._wait_for_completion_callback_mode())
 
-                # 🆕 ENHANCED: Status updates with catalog progress and filter info
+                # ENHANCED: Status updates with catalog progress and filter info
                 if current_time - last_status_update >= status_update_interval:
                     progress_percent = (scanned_media_count / total_media_files * 100) if total_media_files > 0 else 0
                     scan_type_text = f"{self.scan_type.title()}s" if self.scan_type else "Media files"
@@ -658,15 +674,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
             self.completed_scan_type = "all" if not self.scan_type else self.scan_type
             await self._save_progress()
             
-            scan_type_text = f"{self.scan_type.title()}s" if self.scan_type else "All media"
-            await self._safe_edit_message(self.status_message, 
-                f"**✅ {scan_type_text} scan completed! ({scanned_media_count}/{total_media_files})**\n"
-                f"**Catalog:** Built with {cataloged_count} files (future scans will be instant!)\n\n"
-                f"**Active:** {len(self.our_active_links)}/{self.max_concurrent} | **Pending:** {len(self.pending_files)}\n"
-                f"**Completed:** {self.completed_count} | **Failed:** {self.failed_count}"
-            )
-
-            # Cancel any existing completion task since we're handling it manually
+            # Cancel any existing completion task
             if completion_task and not completion_task.done():
                 completion_task.cancel()
                 try:
@@ -674,27 +682,35 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 except asyncio.CancelledError:
                     pass
 
-            # Manual completion monitoring - ensure ALL downloads finish
-            post_scan_iterations = 0
-            while (self.our_active_links or self.pending_files) and not self.is_cancelled:
-                post_scan_iterations += 1
-                
-                # Start any remaining downloads
-                while len(self.our_active_links) < self.max_concurrent and self.pending_files:
-                    await self._start_next_download()
-                
-                # Update status periodically during post-scan downloads
-                if post_scan_iterations % 3 == 0:  # Every 30 seconds
-                    await self._safe_edit_message(self.status_message,
-                        f"**✅ Scan completed! Processing remaining downloads...**\n\n"
-                        f"**Active:** {len(self.our_active_links)}/{self.max_concurrent} | **Pending:** {len(self.pending_files)}\n"
-                        f"**Completed:** {self.completed_count} | **Failed:** {self.failed_count}\n"
-                        f"**Processing:** Iteration {post_scan_iterations}"
-                    )
-                
-                # Keep monitoring via TaskListener callbacks
-                await asyncio.sleep(10)
+            # SHOW SCAN COMPLETION STATUS WITH PENDING DOWNLOADS INFO
+            scan_type_text = f"{self.scan_type.title()}s" if self.scan_type else "All media"
+            total_pending = len(self.our_active_links) + len(self.pending_files)
             
+            if total_pending > 0:
+                # Scan completed with pending downloads
+                await self._safe_edit_message(self.status_message, 
+                    f"**✅ {scan_type_text} scan completed! ({scanned_media_count}/{total_media_files})**\n"
+                    f"**Catalog:** Built with {cataloged_count} files (future scans will be instant!)\n\n"
+                    f"**📥 Downloads queued: {total_pending} files**\n"
+                    f"**Active:** {len(self.our_active_links)}/{self.max_concurrent} | **Pending:** {len(self.pending_files)}\n"
+                    f"**Completed:** {self.completed_count} | **Failed:** {self.failed_count}\n\n"
+                    f"**⏳ Waiting for queued processes to complete...**"
+                )
+            else:
+                # Scan completed with no downloads needed
+                await self._safe_edit_message(self.status_message, 
+                    f"**✅ {scan_type_text} scan completed! ({scanned_media_count}/{total_media_files})**\n"
+                    f"**Catalog:** Built with {cataloged_count} files (future scans will be instant!)\n\n"
+                    f"**📥 No downloads needed** - all files already exist or filtered out\n"
+                    f"**Final Results:** {self.completed_count} completed | {self.failed_count} failed"
+                )
+                # No need to wait for completion if nothing to download
+                return
+
+            # Wait for downloads to complete silently (NO status updates)
+            await self._wait_for_completion_callback_mode()
+            
+            # Only show final results when everything is truly done
             await self._show_final_results(processed_messages, 0)
             
         except TimeoutError as e:
@@ -710,7 +726,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
             LOGGER.error(f"[cleech] Processing error: {e}", exc_info=True)
             await self._save_progress(interrupted=True)
             raise
-
 
     async def _handle_our_task_completion(self, link, name, size, files, folders, mime_type):
         """Handle completion of our tracked task - called by TaskListener callback"""
@@ -916,27 +931,13 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 return
 
     async def _wait_for_completion_callback_mode(self):
-        """Wait for completion using TaskListener callbacks - no database polling!"""
-        post_scan_iterations = 0
+        """Wait for completion using TaskListener callbacks - NO status updates!"""
         while (self.our_active_links or self.pending_files) and not self.is_cancelled:
-            post_scan_iterations += 1
-            
             # Start new downloads if slots available
-            downloads_started = 0
             while len(self.our_active_links) < self.max_concurrent and self.pending_files:
                 await self._start_next_download()
-                downloads_started += 1
             
-            # Update status periodically during post-scan downloads
-            if post_scan_iterations % 3 == 0:  # Every 30 seconds
-                await self._safe_edit_message(self.status_message,
-                    f"**✅ {'Catalog' if self.catalog_mode != 'full' else 'Scan'} completed! Processing downloads...**\n\n"
-                    f"**Active:** {len(self.our_active_links)}/{self.max_concurrent} | **Pending:** {len(self.pending_files)}\n"
-                    f"**Completed:** {self.completed_count} | **Failed:** {self.failed_count}\n"
-                    f"**Processing:** Iteration {post_scan_iterations}"
-                )
-            
-            # Keep monitoring via TaskListener callbacks
+            # Just wait - no status updates
             await asyncio.sleep(10)
 
     async def _restore_resume_state(self, scanner):
