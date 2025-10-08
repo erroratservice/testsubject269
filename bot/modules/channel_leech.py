@@ -678,7 +678,8 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 self.channel_chat_id, 
                 latest_msg_id=latest_msg_id,
                 total_cataloged=cataloged_count,
-                channel_username=channel_username
+                channel_username=channel_username,
+                catalog_status='complete'  # Mark as complete only when finished
             )
             
             self.completed_scan_type = "all" if not self.scan_type else self.scan_type
@@ -1082,9 +1083,18 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 "pending_files": [f['message_id'] for f in self.pending_files] + [item['message_id'] for item in self.link_to_file_mapping.values()],
                 "timestamp": datetime.utcnow().isoformat(),
                 "interrupted": interrupted,
-                "completed_scan_type": self.completed_scan_type
+                "completed_scan_type": self.completed_scan_type,
+                "catalog_mode": getattr(self, 'catalog_mode', None)  # Track what mode was being used
             }
             await database.save_leech_progress(self.message.from_user.id, self.channel_id, progress)
+            
+            # If interrupted during full catalog building, keep status as incomplete
+            if interrupted and getattr(self, 'catalog_mode', None) == 'full':
+                await database.update_channel_metadata(
+                    self.channel_chat_id,
+                    catalog_status='incomplete'  # Ensure it stays incomplete
+                )
+                
         except Exception as e:
             LOGGER.error(f"[cleech] Error saving progress: {e}")
 
