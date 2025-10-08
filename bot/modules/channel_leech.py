@@ -257,7 +257,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
             return self.resume_from_msg_id if self.resume_from_msg_id > 0 else 0
 
     async def _determine_catalog_mode(self):
-        """Determine the best scanning strategy"""
+        """Determine the best scanning strategy with interruption handling"""
         try:
             metadata = await database.get_channel_metadata(self.channel_chat_id)
             catalog_stats = await database.get_catalog_stats(self.channel_chat_id)
@@ -265,6 +265,13 @@ class SimpleChannelLeechCoordinator(TaskListener):
             if not metadata or not catalog_stats:
                 # No catalog exists - need full scan
                 LOGGER.info(f"[cleech-catalog] No catalog found for {self.channel_id}, doing full scan")
+                return 'full'
+            
+            # CHECK: Was the last catalog build interrupted or incomplete?
+            catalog_status = metadata.get('catalog_status', 'incomplete')
+            if catalog_status == 'incomplete':
+                # Catalog building was interrupted - resume full scan
+                LOGGER.info(f"[cleech-catalog] Previous catalog build was interrupted, resuming full scan")
                 return 'full'
             
             # Check if catalog is recent enough (within last 24 hours)
@@ -276,14 +283,13 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 LOGGER.info(f"[cleech-catalog] Catalog is {time_diff/3600:.1f} hours old, doing incremental scan")
                 return 'incremental'
             
-            # Catalog is fresh - just filter existing data
+            # Catalog is fresh and complete - just filter existing data
             LOGGER.info(f"[cleech-catalog] Using fresh catalog (last scan: {time_diff/3600:.1f} hours ago)")
             return 'filter_only'
             
         except Exception as e:
             LOGGER.error(f"[cleech-catalog] Error determining catalog mode: {e}")
             return 'full'
-
     async def _process_from_catalog(self):
         """Process files directly from catalog with current filters"""
         try:
@@ -406,6 +412,10 @@ class SimpleChannelLeechCoordinator(TaskListener):
             await self._safe_edit_message(self.status_message, 
                 "**🚀 Starting channel scan with smart catalog building...**\n"
                 "**This works like normal scan but builds catalog for future speed!**")
+            await database.update_channel_metadata(
+                self.channel_chat_id, 
+                catalog_status='incomplete'  # Mark as incomplete at start
+            )            
             
             scanner = ChannelScanner(user, self.channel_id, filter_tags=self.filter_tags)
             
