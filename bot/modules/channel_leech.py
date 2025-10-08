@@ -1119,33 +1119,54 @@ class SimpleChannelLeechCoordinator(TaskListener):
         parsed, i = {}, 0
         while i < len(args):
             if args[i] == '-ch':
-                parsed['channel'] = args[i+1]; i+=2
+                if i + 1 < len(args):
+                    parsed['channel'] = args[i+1]
+                    i += 2
+                else:
+                    i += 1
             elif args[i] == '-f':
-                text = args[i+1]
-                parsed['filter'] = text[1:-1].split() if text.startswith('"') else text.split()
-                parsed['filter_mode'] = 'and'  # Default AND mode for -f
-                i+=2
+                # Collect ALL words after -f until next flag or end
+                filter_words = []
+                i += 1
+                while i < len(args) and not args[i].startswith('-'):
+                    filter_words.append(args[i])
+                    i += 1
+                if filter_words:
+                    parsed['filter'] = filter_words
+                    parsed['filter_mode'] = 'and'  # Default AND mode for -f
             elif args[i] == '-feither':
-                text = args[i+1]
-                parsed['filter'] = text[1:-1].split() if text.startswith('"') else text.split()
-                parsed['filter_mode'] = 'or'   # OR mode for -feither
-                i+=2
+                # Collect ALL words after -feither until next flag or end
+                filter_words = []
+                i += 1
+                while i < len(args) and not args[i].startswith('-'):
+                    filter_words.append(args[i])
+                    i += 1
+                if filter_words:
+                    parsed['filter'] = filter_words
+                    parsed['filter_mode'] = 'or'   # OR mode for -feither
             elif args[i] == '--no-caption':
-                parsed['no_caption'] = True; i+=1
+                parsed['no_caption'] = True
+                i += 1
             elif args[i] == '-type':
                 if i + 1 < len(args) and args[i+1].lower() in ['document', 'media']:
                     parsed['type'] = args[i+1].lower()
-                i+=2
+                    i += 2
+                else:
+                    i += 1
             elif args[i] == '-from':
                 if i + 1 < len(args) and args[i+1].isdigit():
                     parsed['from_msg_id'] = int(args[i+1])
-                i+=2
+                    i += 2
+                else:
+                    i += 1
             elif args[i] == '-to':
                 if i + 1 < len(args) and args[i+1].isdigit():
                     parsed['to_msg_id'] = int(args[i+1])
-                i+=2
+                    i += 2
+                else:
+                    i += 1
             else:
-                i+=1
+                i += 1
         return parsed
 
     def cancel_task(self):
