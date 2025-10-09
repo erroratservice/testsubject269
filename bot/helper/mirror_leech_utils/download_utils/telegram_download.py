@@ -49,7 +49,6 @@ class TelegramDownloadHelper:
             await self._listener.on_download_start()
             if self._listener.multi <= 1:
                 await send_status_message(self._listener.message)
-            LOGGER.info(f"Download from Telegram: {self._listener.name}")
         else:
             LOGGER.info(f"Start Queued Download from Telegram: {self._listener.name}")
 
@@ -62,11 +61,6 @@ class TelegramDownloadHelper:
         
         self._processed_bytes = current
         self._last_progress_time = time()
-        
-        # Log progress every 10MB for debugging
-        if current > 0 and current % (10 * 1024 * 1024) == 0:
-            progress_percent = (current / total * 100) if total > 0 else 0
-            LOGGER.info(f"Download progress: {current}/{total} bytes ({progress_percent:.1f}%) - {self._listener.name}")
 
     async def _on_download_error(self, error):
         async with global_lock:
@@ -118,8 +112,6 @@ class TelegramDownloadHelper:
         
         while retry_count <= max_retries:
             try:
-                LOGGER.info(f"Starting download attempt {retry_count + 1}/{max_retries + 1}: {self._listener.name}")
-                
                 # Reset progress tracking
                 self._processed_bytes = 0
                 self._last_progress_time = time()
@@ -131,7 +123,6 @@ class TelegramDownloadHelper:
                 
                 if media:
                     self._expected_size = media.file_size
-                    LOGGER.info(f"Expected file size: {self._expected_size} bytes ({self._expected_size/(1024*1024):.2f}MB)")
                 
                 # Start download with enhanced error handling
                 download_start_time = time()
@@ -160,10 +151,6 @@ class TelegramDownloadHelper:
                     )
                     
                     if is_valid:
-                        download_time = time() - download_start_time
-                        avg_speed = self._expected_size / download_time / (1024 * 1024) if download_time > 0 else 0
-                        LOGGER.info(f"Download completed and validated successfully: {self._listener.name} "
-                                  f"({download_time:.1f}s, {avg_speed:.2f}MB/s)")
                         await self._on_download_complete()
                         return
                     else:
@@ -171,7 +158,6 @@ class TelegramDownloadHelper:
                         try:
                             if os.path.exists(download_result):
                                 os.remove(download_result)
-                                LOGGER.warning(f"Removed invalid download file: {download_result}")
                         except:
                             pass
                         
@@ -181,13 +167,12 @@ class TelegramDownloadHelper:
                 
             except FloodWait as f:
                 wait_time = f.value + 5  # Add 5 seconds buffer
-                LOGGER.warning(f"FloodWait: sleeping for {wait_time}s (attempt {retry_count + 1})")
+                LOGGER.warning(f"FloodWait: sleeping for {wait_time}s - {self._listener.name}")
                 await sleep(wait_time)
                 continue  # Don't count FloodWait as a retry
                 
             except TimeoutError as e:
-                error_msg = f"TimeoutError during download - attempt {retry_count + 1}/{max_retries + 1}: {str(e)}"
-                LOGGER.error(error_msg)
+                LOGGER.error(f"Download timeout (attempt {retry_count + 1}): {self._listener.name} - {str(e)}")
                 
                 if retry_count >= max_retries:
                     await self._on_download_error(f"Download timed out after {max_retries + 1} attempts")
@@ -195,14 +180,10 @@ class TelegramDownloadHelper:
                 else:
                     retry_count += 1
                     backoff_time = base_backoff * (2 ** (retry_count - 1))  # Exponential backoff
-                    LOGGER.info(f"Retrying after {backoff_time}s backoff...")
                     await sleep(backoff_time)
                     continue
                     
             except OSError as e:
-                error_msg = f"Network error during download - attempt {retry_count + 1}/{max_retries + 1}: {str(e)}"
-                LOGGER.error(error_msg)
-                
                 # Handle specific network errors
                 if any(err_type in str(e).lower() for err_type in 
                       ["network is unreachable", "connection reset", "connection timed out", "broken pipe"]):
@@ -212,7 +193,6 @@ class TelegramDownloadHelper:
                     else:
                         retry_count += 1
                         backoff_time = base_backoff * (2 ** (retry_count - 1))
-                        LOGGER.info(f"Network error - retrying after {backoff_time}s...")
                         await sleep(backoff_time)
                         continue
                 else:
@@ -220,10 +200,7 @@ class TelegramDownloadHelper:
                     return
                     
             except Exception as e:
-                error_msg = f"Unexpected error during download - attempt {retry_count + 1}/{max_retries + 1}: {str(e)}"
-                LOGGER.error(error_msg)
-                
-                # Check for specific Pyrogram errors that indicate corruption
+                # Check for specific errors that indicate corruption/validation issues
                 if any(err_type in str(e).lower() for err_type in 
                       ["validation failed", "size mismatch", "appears incomplete", "download stalled"]):
                     if retry_count >= max_retries:
@@ -232,7 +209,6 @@ class TelegramDownloadHelper:
                     else:
                         retry_count += 1
                         backoff_time = base_backoff * (2 ** (retry_count - 1))
-                        LOGGER.info(f"Download corrupted - retrying after {backoff_time}s...")
                         await sleep(backoff_time)
                         continue
                 else:
@@ -318,6 +294,4 @@ class TelegramDownloadHelper:
 
     async def cancel_task(self):
         self._listener.is_cancelled = True
-        LOGGER.info(
-            f"Cancelling download on user request: name: {self._listener.name} id: {self._id}"
-        )
+        LOGGER.info(f"Cancelling download: {self._listener.name}")
