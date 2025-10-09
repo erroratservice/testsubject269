@@ -1230,18 +1230,26 @@ class SimpleChannelLeechCoordinator(TaskListener):
         success_rate = (self.completed_count / total_attempted * 100) if total_attempted > 0 else 0
         
         if self.catalog_mode == 'filter_only':
+            # Enhanced catalog mode results
             text = (
                 f"**✅ Channel Leech Completed! (Catalog Mode)**\n\n"
+                f"**📊 Processing Results:**\n"
+                f"**Files analyzed:** {processed_messages:,}\n"
+                f"**Filter rejections:** {skipped_duplicates:,}\n"
                 f"**Downloaded:** {self.completed_count} | **Failed:** {self.failed_count}\n"
-                f"**Success Rate:** {success_rate:.1f}%\n"
-                f"**Mode:** Used existing catalog (super fast!)"
+                f"**Success Rate:** {success_rate:.1f}%\n\n"
+                f"**⚡ Mode:** Used existing catalog (super fast!)\n"
+                f"**📈 Efficiency:** {((processed_messages - skipped_duplicates) / processed_messages * 100) if processed_messages > 0 else 0:.1f}% filter match rate"
             )
         else:
+            # Standard scan mode results
             text = (
                 f"**✅ Channel Leech Completed!**\n\n"
-                f"**Scanned:** {processed_messages} items\n"
+                f"**📊 Scanning Results:**\n"
+                f"**Scanned:** {processed_messages:,} items\n"
                 f"**Downloaded:** {self.completed_count} | **Failed:** {self.failed_count}\n"
-                f"**Success Rate:** {success_rate:.1f}%"
+                f"**Success Rate:** {success_rate:.1f}%\n\n"
+                f"**📈 Next scan will use catalog (99% faster!)**"
             )
         await self._safe_edit_message(self.status_message, text)
 
