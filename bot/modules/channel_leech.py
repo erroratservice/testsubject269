@@ -302,7 +302,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
             LOGGER.error(f"[cleech-catalog] Error determining catalog mode: {e}")
             return 'full'
     async def _process_from_catalog(self):
-        """Process files directly from catalog with current filters - WITH DEBUG LOGGING"""
+        """Process files directly from catalog with current filters - WITH DETAILED STATISTICS"""
         try:
             await self._safe_edit_message(self.status_message, 
                 "**🗄️ Loading files from catalog...**\n\n"
@@ -317,8 +317,18 @@ class SimpleChannelLeechCoordinator(TaskListener):
             LOGGER.info(f"[cleech-catalog] From message ID: {self.from_msg_id}")
             LOGGER.info(f"[cleech-catalog] To message ID: {self.to_msg_id}")
             
-            # Get filtered files from catalog
-            catalog_files = await database.get_catalog_files(
+            # Get catalog statistics BEFORE filtering
+            catalog_stats = await database.get_catalog_stats(self.channel_chat_id)
+            total_catalog_files = catalog_stats.get('total_files', 0) if catalog_stats else 0
+            
+            # Show initial catalog loading status
+            await self._safe_edit_message(self.status_message, 
+                f"**🗄️ Processing catalog ({total_catalog_files:,} total files)...**\n\n"
+                f"**Filter:** {self._get_filter_description()}\n"
+                f"**Range:** {self._get_range_description()}")
+            
+            # Get filtered files from catalog WITH statistics tracking
+            catalog_files, catalog_statistics = await database.get_catalog_files_with_stats(
                 channel_id=self.channel_chat_id,
                 filter_tags=self.filter_tags,
                 filter_mode=self.filter_mode,
@@ -330,22 +340,46 @@ class SimpleChannelLeechCoordinator(TaskListener):
             self.pending_files = catalog_files
             total_found = len(catalog_files)
             
-            # DEBUG: Log catalog results
-            LOGGER.info(f"[cleech-catalog] CATALOG RESULTS:")
-            LOGGER.info(f"[cleech-catalog] Total files found in catalog: {total_found}")
+            # Extract detailed statistics
+            total_processed = catalog_statistics.get('total_processed', 0)
+            filter_rejected = catalog_statistics.get('filter_rejected', 0)
+            already_downloaded = catalog_statistics.get('already_downloaded', 0)
+            type_filtered = catalog_statistics.get('type_filtered', 0)
+            range_filtered = catalog_statistics.get('range_filtered', 0)
+            
+            # Calculate percentages
+            filter_match_rate = ((total_processed - filter_rejected) / total_processed * 100) if total_processed > 0 else 0
+            download_rate = (total_found / (total_processed - filter_rejected) * 100) if (total_processed - filter_rejected) > 0 else 0
+            
+            # DEBUG: Log catalog results with detailed breakdown
+            LOGGER.info(f"[cleech-catalog] DETAILED CATALOG RESULTS:")
+            LOGGER.info(f"[cleech-catalog] Total catalog files: {total_catalog_files:,}")
+            LOGGER.info(f"[cleech-catalog] Files processed: {total_processed:,}")
+            LOGGER.info(f"[cleech-catalog] Type filtered out: {type_filtered:,}")
+            LOGGER.info(f"[cleech-catalog] Range filtered out: {range_filtered:,}")
+            LOGGER.info(f"[cleech-catalog] Filter rejected: {filter_rejected:,}")
+            LOGGER.info(f"[cleech-catalog] Already downloaded: {already_downloaded:,}")
+            LOGGER.info(f"[cleech-catalog] Final matches for download: {total_found:,}")
+            LOGGER.info(f"[cleech-catalog] Filter match rate: {filter_match_rate:.1f}%")
             
             if total_found == 0:
                 # DEBUG: Check what's actually in the catalog
                 await self._debug_catalog_contents()
                 
+                # Show detailed "no results" message with statistics
+                scan_type_text = f" {self.scan_type}" if self.scan_type else ""
                 await self._safe_edit_message(self.status_message, 
-                    f"**✅ Catalog loaded! No matching files found**\n\n"
+                    f"**✅ Catalog processed! No matching files found for download**\n\n"
+                    f"**📊 Catalog Statistics:**\n"
+                    f"**Total{scan_type_text} files in catalog:** {total_processed:,}\n"
+                    f"**Filter rejections:** {filter_rejected:,} ({100-filter_match_rate:.1f}%)\n"
+                    f"**Already downloaded:** {already_downloaded:,}\n"
+                    f"**Available for download:** {total_found} files\n\n"
                     f"**Filter:** {self._get_filter_description()}\n"
                     f"**Range:** {self._get_range_description()}\n\n"
-                    f"**📥 All matching files already downloaded or filtered out**\n"
-                    f"**Debug:** Check logs for catalog analysis"
+                    f"**💡 All matching files already downloaded or none match your filter**"
                 )
-                await self._show_final_results(0, 0)
+                await self._show_final_results(total_processed, filter_rejected)
                 return
             
             # DEBUG: Log first few results
@@ -366,10 +400,17 @@ class SimpleChannelLeechCoordinator(TaskListener):
             while len(self.our_active_links) < self.max_concurrent and self.pending_files:
                 await self._start_next_download()
             
-            # Show catalog completion status with pending downloads info
+            # Show detailed catalog completion status with comprehensive statistics
             total_pending = len(self.our_active_links) + len(self.pending_files)
+            scan_type_text = f" {self.scan_type}" if self.scan_type else ""
+            
             await self._safe_edit_message(self.status_message, 
-                f"**✅ Catalog loaded! Found {total_found} matching files**\n\n"
+                f"**✅ Catalog processed! Found {total_found:,} files for download**\n\n"
+                f"**📊 Catalog Statistics:**\n"
+                f"**Total{scan_type_text} files processed:** {total_processed:,}\n"
+                f"**Filter match rate:** {filter_match_rate:.1f}% ({total_processed - filter_rejected:,} matched)\n"
+                f"**Already downloaded:** {already_downloaded:,} (skipped)\n"
+                f"**Available for download:** {total_found:,} files\n\n"
                 f"**Filter:** {self._get_filter_description()}\n"
                 f"**Range:** {self._get_range_description()}\n\n"
                 f"**📥 Downloads queued: {total_pending} files**\n"
@@ -381,7 +422,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
             await self._wait_for_completion_callback_mode()
             
             # Only show final results when everything is done
-            await self._show_final_results(0, 0)
+            await self._show_final_results(total_processed, filter_rejected)
             
         except Exception as e:
             LOGGER.error(f"[cleech-catalog] Error processing from catalog: {e}", exc_info=True)
