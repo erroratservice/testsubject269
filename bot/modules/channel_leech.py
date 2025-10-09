@@ -384,11 +384,10 @@ class SimpleChannelLeechCoordinator(TaskListener):
                     duplicate_count += 1
             
             self.pending_files = filtered_files
-            already_downloaded += duplicate_count
-            total_found = len(self.pending_files)
             
-            if duplicate_count > 0:
-                LOGGER.info(f"[cleech] Filtered out {duplicate_count} duplicates from queue")
+            # Update statistics with separate duplicate tracking
+            catalog_statistics['duplicate_rejected'] = duplicate_count
+            total_found = len(self.pending_files)
             
             if total_found == 0:
                 scan_type_text = f" {self.scan_type}" if self.scan_type else ""
