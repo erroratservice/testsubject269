@@ -7,6 +7,7 @@ from pymongo.errors import PyMongoError
 from datetime import datetime
 import os
 import re
+import time
 from bot import (
     user_data,
     rss_dict,
@@ -515,8 +516,8 @@ class DbManager:
         except Exception as e:
             LOGGER.error(f"Error adding catalog entry: {e}")
 
-    async def get_catalog_files_with_stats(self, channel_id, filter_tags=None, filter_mode='and', scan_type=None, from_msg_id=None, to_msg_id=None):
-        """Get files from catalog with enhanced filtering and detailed statistics tracking"""
+    async def get_catalog_files_with_stats(self, channel_id, filter_tags=None, filter_mode='and', scan_type=None, from_msg_id=None, to_msg_id=None, progress_callback=None):
+        """Get files from catalog with enhanced filtering and live progress updates"""
         try:
             # Initialize detailed statistics tracking
             stats = {
@@ -525,7 +526,7 @@ class DbManager:
                 'already_downloaded': 0,
                 'type_filtered': 0,
                 'range_filtered': 0,
-                'duplicate_rejected': 0  # NEW: Track queue duplicates separately
+                'duplicate_rejected': 0
             }
             
             # Build optimized MongoDB aggregation pipeline
@@ -538,7 +539,7 @@ class DbManager:
             total_result = await total_cursor.to_list(1)
             total_in_channel = total_result[0]['total'] if total_result else 0
             
-            # Stage 2: Apply message range filters
+            # Apply range filters
             if from_msg_id or to_msg_id:
                 msg_range = {}
                 if from_msg_id:
@@ -548,13 +549,12 @@ class DbManager:
                 range_filter_stage = {"message_id": msg_range}
                 pipeline.append({"$match": range_filter_stage})
                 
-                # Count range filtered
                 range_cursor = self._db.channel_catalog.aggregate(pipeline + [{"$count": "total"}])
                 range_result = await range_cursor.to_list(1)
                 after_range = range_result[0]['total'] if range_result else 0
                 stats['range_filtered'] = total_in_channel - after_range
             
-            # Stage 3: Apply scan type filter
+            # Apply scan type filter
             if scan_type == 'document':
                 type_filter = {"file_info.mime_type": {"$regex": "^(application/|text/)"}}
                 pipeline.append({"$match": type_filter})
@@ -562,7 +562,6 @@ class DbManager:
                 type_filter = {"file_info.mime_type": {"$regex": "^video/"}}
                 pipeline.append({"$match": type_filter})
             
-            # Count after type filtering
             if scan_type:
                 type_cursor = self._db.channel_catalog.aggregate(pipeline + [{"$count": "total"}])
                 type_result = await type_cursor.to_list(1)
@@ -576,7 +575,7 @@ class DbManager:
             before_text_filtering = before_text_result[0]['total'] if before_text_result else 0
             stats['total_processed'] = before_text_filtering
             
-            # Stage 4: Apply filter tags
+            # Apply filter tags
             if filter_tags:
                 if filter_mode == 'or':
                     or_conditions = []
@@ -587,7 +586,6 @@ class DbManager:
                     for tag in filter_tags:
                         pipeline.append({"$match": {"file_info.search_text": {"$regex": re.escape(tag), "$options": "i"}}})
             
-            # Count after text filtering
             if filter_tags:
                 after_text_cursor = self._db.channel_catalog.aggregate(pipeline + [{"$count": "total"}])
                 after_text_result = await after_text_cursor.to_list(1)
@@ -604,7 +602,7 @@ class DbManager:
                 }
             })
             
-            # Execute aggregation
+            # Execute aggregation with progress tracking
             aggregation_options = {
                 "allowDiskUse": True,
                 "maxTimeMS": 300000,
@@ -615,13 +613,22 @@ class DbManager:
             
             matched_files = []
             already_downloaded = 0
+            processed_count = 0
+            last_progress_time = 0
             
-            # Process results with detailed tracking
+            # Process results with live progress updates
             async for entry in cursor:
+                processed_count += 1
                 file_info = entry['file_info']
                 sanitized_name = file_info.get('sanitized_name', file_info.get('file_name', ''))
                 
-                # Check if file already exists (downloaded or failed)
+                # Live progress updates every 1000 entries or every 5 seconds
+                current_time = time.time()
+                if (processed_count % 1000 == 0 or current_time - last_progress_time >= 5) and progress_callback:
+                    await progress_callback(processed_count, before_text_filtering, len(matched_files), already_downloaded)
+                    last_progress_time = current_time
+                
+                # Check if file already exists
                 if not await self.check_file_exists(file_info=file_info):
                     matched_files.append({
                         'message_id': entry['message_id'],
@@ -632,9 +639,11 @@ class DbManager:
                 else:
                     already_downloaded += 1
             
-            # Update final statistics
-            stats['already_downloaded'] = already_downloaded
+            # Final progress update
+            if progress_callback:
+                await progress_callback(processed_count, before_text_filtering, len(matched_files), already_downloaded)
             
+            stats['already_downloaded'] = already_downloaded
             return matched_files, stats
             
         except Exception as e:
