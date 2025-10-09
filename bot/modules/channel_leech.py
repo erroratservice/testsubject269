@@ -276,7 +276,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
             return 'full'
 
     async def _is_download_duplicate(self, file_item):
-        """Enhanced duplicate checking with queue integration"""
+        """Enhanced duplicate checking with queue integration and failed file handling"""
         try:
             sanitized_name = self._generate_clean_filename(file_item['file_info'])
             file_info = file_item['file_info']
@@ -298,8 +298,11 @@ class SimpleChannelLeechCoordinator(TaskListener):
             if await self._check_bot_task_queue(sanitized_name, url):
                 return True
             
-            # Check if file already exists
+            # Check if file already exists (includes both completed AND failed files)
             if await database.check_file_exists(file_info=file_info):
+                # OPTIONAL: Check if failed file should be retried
+                # if not await database.should_retry_failed_file(file_info):
+                #     return True
                 return True
             
             return False
@@ -809,7 +812,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
             raise
 
     async def _handle_our_task_completion(self, link, name, size, files, folders, mime_type):
-        """Handle completion of our tracked task"""
+        """Handle completion of our tracked task - with database tracking"""
         try:
             self.our_active_links.discard(link)
             file_item = self.link_to_file_mapping.pop(link, None)
@@ -824,9 +827,17 @@ class SimpleChannelLeechCoordinator(TaskListener):
             if file_unique_id:
                 self.pending_file_ids.discard(file_unique_id)
 
-            # Update counters
+            # SUCCESS: Add to database to prevent future downloads
             self.completed_count += 1
-            await database.add_file_entry(self.channel_chat_id, file_item['message_id'], file_item['file_info'])
+            
+            # CRITICAL: Mark file as completed in database
+            await database.add_file_entry(
+                channel_id=self.channel_chat_id, 
+                message_id=file_item['message_id'], 
+                file_data=file_item['file_info']
+            )
+            
+            LOGGER.info(f"[cleech] ✅ Successfully downloaded and marked: {sanitized_name}")
             
             # Start next downloads
             while len(self.our_active_links) < self.max_concurrent and self.pending_files:
@@ -838,7 +849,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
             LOGGER.error(f"[cleech] Error handling task completion: {e}")
 
     async def _handle_our_task_failure(self, link, error):
-        """Handle failure of our tracked task"""
+        """Handle failure of our tracked task - with database tracking to prevent retries"""
         try:
             self.our_active_links.discard(link)
             file_item = self.link_to_file_mapping.pop(link, None)
@@ -849,6 +860,16 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 file_unique_id = file_item['file_info'].get('file_unique_id')
                 if file_unique_id:
                     self.pending_file_ids.discard(file_unique_id)
+                
+                # CRITICAL: Mark failed file in database to prevent infinite retries
+                await database.add_failed_file_entry(
+                    channel_id=self.channel_chat_id,
+                    message_id=file_item['message_id'], 
+                    file_data=file_item['file_info'],
+                    error_reason=str(error)
+                )
+                
+                LOGGER.info(f"[cleech] ❌ Failed download marked to prevent retry: {sanitized_name} (Error: {error})")
             
             self.failed_count += 1
             
