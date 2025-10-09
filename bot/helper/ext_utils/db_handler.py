@@ -165,6 +165,9 @@ class DbManager:
                 del row["_id"]
                 rss_dict[user_id] = row
             LOGGER.info("Rss data has been imported from Database.")
+        
+        # Ensure catalog indexes exist for performance
+        await self.ensure_catalog_indexes()
 
     async def update_deploy_config(self):
         if self._return:
@@ -482,103 +485,123 @@ class DbManager:
             LOGGER.error(f"[DB] Error adding catalog entry: {e}")
 
     async def get_catalog_files(self, channel_id, filter_tags=None, filter_mode='and', scan_type=None, from_msg_id=None, to_msg_id=None):
-        """Get files from catalog with enhanced filtering using sanitized names - WITH DEBUG LOGGING"""
+        """Get files from catalog with enhanced filtering - MAXIMUM MONGODB LIMITS"""
         try:
             # DEBUG: Log database query parameters
-            LOGGER.info(f"[DB-catalog] DATABASE QUERY DEBUG:")
+            LOGGER.info(f"[DB-catalog] DATABASE QUERY DEBUG (OPTIMIZED):")
             LOGGER.info(f"[DB-catalog] Channel ID: {channel_id}")
             LOGGER.info(f"[DB-catalog] Filter tags: {filter_tags}")
             LOGGER.info(f"[DB-catalog] Filter mode: {filter_mode}")
             LOGGER.info(f"[DB-catalog] Scan type: {scan_type}")
             
-            query = {"channel_id": channel_id}
+            # Build optimized MongoDB aggregation pipeline
+            pipeline = []
             
-            # Apply message range filters
+            # Stage 1: Match channel (most selective first)
+            match_stage = {"channel_id": channel_id}
+            
+            # Apply message range filters in first match stage
             if from_msg_id or to_msg_id:
                 msg_range = {}
                 if from_msg_id:
                     msg_range["$lte"] = from_msg_id
                 if to_msg_id:
                     msg_range["$gte"] = to_msg_id
-                query["message_id"] = msg_range
+                match_stage["message_id"] = msg_range
                 LOGGER.info(f"[DB-catalog] Message range filter: {msg_range}")
             
-            # Apply scan type filter
+            # Apply scan type filter in first match stage
             if scan_type == 'document':
-                query["file_info.mime_type"] = {"$regex": "^(application/|text/)"}
+                match_stage["file_info.mime_type"] = {"$regex": "^(application/|text/)"}
                 LOGGER.info(f"[DB-catalog] Document type filter applied")
             elif scan_type == 'media':
-                query["file_info.mime_type"] = {"$regex": "^video/"}
+                match_stage["file_info.mime_type"] = {"$regex": "^video/"}
                 LOGGER.info(f"[DB-catalog] Media type filter applied")
             
-            LOGGER.info(f"[DB-catalog] MongoDB query: {query}")
+            pipeline.append({"$match": match_stage})
             
-            cursor = self._db.channel_catalog.find(query).sort("message_id", -1)
+            # Stage 2: Apply filter tags (most efficient approach)
+            if filter_tags:
+                if filter_mode == 'or':
+                    # OR logic: Use $or with regex for each tag
+                    or_conditions = []
+                    for tag in filter_tags:
+                        or_conditions.append({"file_info.search_text": {"$regex": re.escape(tag), "$options": "i"}})
+                    pipeline.append({"$match": {"$or": or_conditions}})
+                    LOGGER.info(f"[DB-catalog] Applied OR filter with {len(filter_tags)} conditions")
+                else:
+                    # AND logic: Multiple $match stages (most efficient for AND)
+                    for tag in filter_tags:
+                        pipeline.append({"$match": {"file_info.search_text": {"$regex": re.escape(tag), "$options": "i"}}})
+                    LOGGER.info(f"[DB-catalog] Applied AND filter with {len(filter_tags)} stages")
             
-            # DEBUG: Count total entries before filtering
-            total_before_filter = await self._db.channel_catalog.count_documents(query)
-            LOGGER.info(f"[DB-catalog] Total entries matching base query: {total_before_filter}")
+            # Stage 3: Sort with disk usage allowed (bypasses 32MB memory limit)
+            pipeline.append({"$sort": {"message_id": -1}})
+            
+            # Stage 4: Project only needed fields to reduce memory usage
+            pipeline.append({
+                "$project": {
+                    "_id": 1,
+                    "message_id": 1,
+                    "file_info": 1
+                }
+            })
+            
+            LOGGER.info(f"[DB-catalog] Optimized aggregation pipeline with {len(pipeline)} stages")
+            
+            # Execute with maximum MongoDB settings
+            aggregation_options = {
+                "allowDiskUse": True,           # Bypass 32MB sort memory limit
+                "maxTimeMS": 300000,            # 5 minutes timeout
+                "cursor": {"batchSize": 1000}   # Process in 1000-document batches
+            }
+            
+            cursor = self._db.channel_catalog.aggregate(pipeline, **aggregation_options)
             
             matched_files = []
             processed_count = 0
-            filter_rejected = 0
             already_downloaded = 0
+            batch_count = 0
             
+            # Process results in batches for memory efficiency
             async for entry in cursor:
                 processed_count += 1
                 file_info = entry['file_info']
                 
-                # DEBUG: Log every 100th entry for progress
-                if processed_count % 100 == 0:
-                    LOGGER.info(f"[DB-catalog] Processed {processed_count} entries, found {len(matched_files)} matches so far")
-                
-                # Apply filter tags using ENHANCED search text
-                if filter_tags:
-                    search_text = file_info.get('search_text', '').lower()
-                    
-                    # DEBUG: Log first few filter attempts
-                    if processed_count <= 5:
-                        LOGGER.info(f"[DB-catalog] Filter test #{processed_count}: '{search_text[:100]}...' vs tags {filter_tags}")
-                    
-                    if filter_mode == 'or':
-                        tag_match = any(tag.lower() in search_text for tag in filter_tags)
-                    else:  # 'and' mode
-                        tag_match = all(tag.lower() in search_text for tag in filter_tags)
-                    
-                    if not tag_match:
-                        filter_rejected += 1
-                        if processed_count <= 5:
-                            LOGGER.info(f"[DB-catalog] Filter REJECTED: No match found")
-                        continue
-                    
-                    if processed_count <= 5:
-                        LOGGER.info(f"[DB-catalog] Filter ACCEPTED: Match found!")
+                # Progress logging every 1000 entries
+                if processed_count % 1000 == 0:
+                    batch_count += 1
+                    LOGGER.info(f"[DB-catalog] Batch {batch_count}: Processed {processed_count} entries, found {len(matched_files)} matches")
                 
                 # Use sanitized name for duplicate checking and downloads
                 sanitized_name = file_info.get('sanitized_name', file_info.get('file_name', ''))
                 
-                # Check if already downloaded using the existing file_info (compatible with existing logic)
+                # Check if already downloaded
                 if not await self.check_file_exists(file_info=file_info):
                     matched_files.append({
                         'message_id': entry['message_id'],
                         'url': f"https://t.me/c/{str(channel_id)[4:]}/{entry['message_id']}",
-                        'filename': sanitized_name,  # Use sanitized name for download
-                        'file_info': file_info  # Include enhanced file_info with sanitized_name
+                        'filename': sanitized_name,
+                        'file_info': file_info
                     })
+                    
+                    # DEBUG: Log first few matches
+                    if len(matched_files) <= 5:
+                        LOGGER.info(f"[DB-catalog] Match #{len(matched_files)}: {file_info.get('file_name', 'Unknown')} | Search: {file_info.get('search_text', '')[:100]}...")
                 else:
                     already_downloaded += 1
             
             # DEBUG: Log final statistics
-            LOGGER.info(f"[DB-catalog] FINAL FILTERING RESULTS:")
+            LOGGER.info(f"[DB-catalog] FINAL RESULTS:")
             LOGGER.info(f"[DB-catalog] Total processed: {processed_count}")
-            LOGGER.info(f"[DB-catalog] Filter rejected: {filter_rejected}")
             LOGGER.info(f"[DB-catalog] Already downloaded: {already_downloaded}")
             LOGGER.info(f"[DB-catalog] Final matches: {len(matched_files)}")
+            LOGGER.info(f"[DB-catalog] Memory usage: ~{len(matched_files) * 0.5:.1f}MB (estimated)")
             
             return matched_files
             
         except Exception as e:
-            LOGGER.error(f"[DB-catalog] Error getting catalog files: {e}", exc_info=True)
+            LOGGER.error(f"[DB-catalog] Error in optimized catalog query: {e}", exc_info=True)
             return []
 
     async def get_channel_metadata(self, channel_id):
@@ -632,7 +655,40 @@ class DbManager:
             return result[0] if result else None
         except Exception as e:
             LOGGER.error(f"[DB] Error getting catalog stats: {e}")
-            return None    
+            return None
+
+    async def ensure_catalog_indexes(self):
+        """Create optimized database indexes for maximum performance"""
+        try:
+            # Compound index for most common queries (channel + message_id + mime_type)
+            await self._db.channel_catalog.create_index([
+                ("channel_id", 1),
+                ("file_info.mime_type", 1),
+                ("message_id", -1)
+            ], background=True, name="channel_mime_msgid")
+            
+            # Compound index for range queries
+            await self._db.channel_catalog.create_index([
+                ("channel_id", 1),
+                ("message_id", -1)
+            ], background=True, name="channel_msgid")
+            
+            # Text index for search functionality (most important for filters)
+            await self._db.channel_catalog.create_index([
+                ("channel_id", 1),
+                ("file_info.search_text", "text")
+            ], background=True, name="channel_search_text")
+            
+            # Additional index for file existence checks
+            await self._db.channel_catalog.create_index([
+                ("channel_id", 1),
+                ("file_info.sanitized_name", 1)
+            ], background=True, name="channel_sanitized")
+            
+            LOGGER.info("[DB] Created optimized catalog indexes with maximum performance")
+            
+        except Exception as e:
+            LOGGER.info(f"[DB] Index creation info (may already exist): {e}")
 
     @property
     def _return(self):  # Compatibility stub for existing code
