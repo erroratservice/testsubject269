@@ -1024,11 +1024,68 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 return
 
     async def _wait_for_completion_callback_mode(self):
-        """Wait for completion using TaskListener callbacks - NO status updates"""
+        """Wait for completion using TaskListener callbacks with detailed status updates"""
+        last_status_update = 0
+        status_update_interval = 10  # Update every 10 seconds
+        start_time = time.time()
+        
         while (self.our_active_links or self.pending_files) and not self.is_cancelled:
             # Start new downloads if slots available
             while len(self.our_active_links) < self.max_concurrent and self.pending_files:
                 await self._start_next_download()
+            
+            current_time = time.time()
+            
+            # Update status message every 10 seconds
+            if current_time - last_status_update >= status_update_interval:
+                try:
+                    total_pending = len(self.our_active_links) + len(self.pending_files)
+                    
+                    if total_pending > 0:
+                        # Calculate progress statistics
+                        total_processed = self.completed_count + self.failed_count
+                        total_started = total_processed + total_pending
+                        progress_percent = (total_processed / total_started * 100) if total_started > 0 else 0
+                        
+                        elapsed_time = current_time - start_time
+                        downloads_per_minute = (total_processed / elapsed_time * 60) if elapsed_time > 0 else 0
+                        
+                        # Estimate time remaining
+                        eta_minutes = (total_pending / downloads_per_minute) if downloads_per_minute > 0 else 0
+                        eta_text = f" (ETA: {eta_minutes:.1f}m)" if eta_minutes > 0 and eta_minutes < 300 else ""
+                        
+                        # Determine scan type text
+                        scan_type_text = f" {self.scan_type}" if self.scan_type else ""
+                        
+                        # Create enhanced status text
+                        if self.catalog_mode == 'filter_only':
+                            status_text = (
+                                f"**✅ Catalog processed! Downloads in progress...**\n\n"
+                                f"**📊 Progress: {progress_percent:.1f}% ({total_processed}/{total_started})**\n"
+                                f"**Active:** {len(self.our_active_links)}/{self.max_concurrent} | **Queued:** {len(self.pending_files)}\n"
+                                f"**Completed:** {self.completed_count} | **Failed:** {self.failed_count}\n"
+                                f"**Rate:** {downloads_per_minute:.1f} files/min{eta_text}\n\n"
+                                f"**Filter:** {self._get_filter_description()}\n"
+                                f"**Range:** {self._get_range_description()}\n\n"
+                                f"**⏳ Processing remaining {total_pending} downloads...**"
+                            )
+                        else:
+                            status_text = (
+                                f"**✅{scan_type_text.title()} scan completed! Downloads in progress...**\n\n"
+                                f"**📊 Progress: {progress_percent:.1f}% ({total_processed}/{total_started})**\n"
+                                f"**Active:** {len(self.our_active_links)}/{self.max_concurrent} | **Queued:** {len(self.pending_files)}\n"
+                                f"**Completed:** {self.completed_count} | **Failed:** {self.failed_count}\n"
+                                f"**Rate:** {downloads_per_minute:.1f} files/min{eta_text}\n\n"
+                                f"**Filter:** {self._get_filter_description()}\n"
+                                f"**Range:** {self._get_range_description()}\n\n"
+                                f"**⏳ Processing remaining {total_pending} downloads...**"
+                            )
+                        
+                        await self._safe_edit_message(self.status_message, status_text)
+                        last_status_update = current_time
+                        
+                except Exception as e:
+                    LOGGER.error(f"[cleech] Error updating status during downloads: {e}")
             
             await asyncio.sleep(10)
 
