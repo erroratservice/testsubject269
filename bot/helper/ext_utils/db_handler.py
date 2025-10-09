@@ -5,9 +5,9 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo.server_api import ServerApi
 from pymongo.errors import PyMongoError
 from datetime import datetime
+import time
 import os
 import re
-import time
 from bot import (
     user_data,
     rss_dict,
@@ -519,7 +519,6 @@ class DbManager:
     async def get_catalog_files_with_stats(self, channel_id, filter_tags=None, filter_mode='and', scan_type=None, from_msg_id=None, to_msg_id=None, progress_callback=None):
         """Get files from catalog with enhanced filtering and live progress updates"""
         try:
-            # Initialize detailed statistics tracking
             stats = {
                 'total_processed': 0,
                 'filter_rejected': 0,
@@ -529,17 +528,14 @@ class DbManager:
                 'duplicate_rejected': 0
             }
             
-            # Build optimized MongoDB aggregation pipeline
             pipeline = []
             base_match_stage = {"channel_id": channel_id}
             pipeline.append({"$match": base_match_stage})
             
-            # Count total files before any filtering
             total_cursor = self._db.channel_catalog.aggregate([{"$match": base_match_stage}, {"$count": "total"}])
             total_result = await total_cursor.to_list(1)
             total_in_channel = total_result[0]['total'] if total_result else 0
             
-            # Apply range filters
             if from_msg_id or to_msg_id:
                 msg_range = {}
                 if from_msg_id:
@@ -554,7 +550,6 @@ class DbManager:
                 after_range = range_result[0]['total'] if range_result else 0
                 stats['range_filtered'] = total_in_channel - after_range
             
-            # Apply scan type filter
             if scan_type == 'document':
                 type_filter = {"file_info.mime_type": {"$regex": "^(application/|text/)"}}
                 pipeline.append({"$match": type_filter})
@@ -569,13 +564,11 @@ class DbManager:
                 before_type = total_in_channel - stats['range_filtered']
                 stats['type_filtered'] = before_type - after_type
             
-            # Count files before text filtering
             before_text_cursor = self._db.channel_catalog.aggregate(pipeline + [{"$count": "total"}])
             before_text_result = await before_text_cursor.to_list(1)
             before_text_filtering = before_text_result[0]['total'] if before_text_result else 0
             stats['total_processed'] = before_text_filtering
             
-            # Apply filter tags
             if filter_tags:
                 if filter_mode == 'or':
                     or_conditions = []
@@ -592,7 +585,6 @@ class DbManager:
                 after_text_filtering = after_text_result[0]['total'] if after_text_result else 0
                 stats['filter_rejected'] = before_text_filtering - after_text_filtering
             
-            # Stage 5: Sort and project
             pipeline.append({"$sort": {"message_id": -1}})
             pipeline.append({
                 "$project": {
@@ -602,7 +594,6 @@ class DbManager:
                 }
             })
             
-            # Execute aggregation with progress tracking
             aggregation_options = {
                 "allowDiskUse": True,
                 "maxTimeMS": 300000,
@@ -616,19 +607,16 @@ class DbManager:
             processed_count = 0
             last_progress_time = 0
             
-            # Process results with live progress updates
             async for entry in cursor:
                 processed_count += 1
                 file_info = entry['file_info']
                 sanitized_name = file_info.get('sanitized_name', file_info.get('file_name', ''))
                 
-                # Live progress updates every 1000 entries or every 5 seconds
                 current_time = time.time()
                 if (processed_count % 1000 == 0 or current_time - last_progress_time >= 5) and progress_callback:
                     await progress_callback(processed_count, before_text_filtering, len(matched_files), already_downloaded)
                     last_progress_time = current_time
                 
-                # Check if file already exists
                 if not await self.check_file_exists(file_info=file_info):
                     matched_files.append({
                         'message_id': entry['message_id'],
@@ -639,7 +627,6 @@ class DbManager:
                 else:
                     already_downloaded += 1
             
-            # Final progress update
             if progress_callback:
                 await progress_callback(processed_count, before_text_filtering, len(matched_files), already_downloaded)
             
@@ -650,73 +637,23 @@ class DbManager:
             LOGGER.error(f"Error in optimized catalog query with stats: {e}")
             return [], {'total_processed': 0, 'filter_rejected': 0, 'already_downloaded': 0, 'type_filtered': 0, 'range_filtered': 0, 'duplicate_rejected': 0}
 
-
-    async def get_catalog_files(self, channel_id, filter_tags=None, filter_mode='and', scan_type=None, from_msg_id=None, to_msg_id=None):
-        """Get files from catalog with enhanced filtering"""
+    async def get_catalog_bounds(self, channel_id):
+        """Get the actual highest and lowest message IDs in catalog"""
         try:
-            pipeline = []
-            match_stage = {"channel_id": channel_id}
-            
-            if from_msg_id or to_msg_id:
-                msg_range = {}
-                if from_msg_id:
-                    msg_range["$lte"] = from_msg_id
-                if to_msg_id:
-                    msg_range["$gte"] = to_msg_id
-                match_stage["message_id"] = msg_range
-            
-            if scan_type == 'document':
-                match_stage["file_info.mime_type"] = {"$regex": "^(application/|text/)"}
-            elif scan_type == 'media':
-                match_stage["file_info.mime_type"] = {"$regex": "^video/"}
-            
-            pipeline.append({"$match": match_stage})
-            
-            if filter_tags:
-                if filter_mode == 'or':
-                    or_conditions = []
-                    for tag in filter_tags:
-                        or_conditions.append({"file_info.search_text": {"$regex": re.escape(tag), "$options": "i"}})
-                    pipeline.append({"$match": {"$or": or_conditions}})
-                else:
-                    for tag in filter_tags:
-                        pipeline.append({"$match": {"file_info.search_text": {"$regex": re.escape(tag), "$options": "i"}}})
-            
-            pipeline.append({"$sort": {"message_id": -1}})
-            pipeline.append({
-                "$project": {
-                    "_id": 1,
-                    "message_id": 1,
-                    "file_info": 1
-                }
-            })
-            
-            aggregation_options = {
-                "allowDiskUse": True,
-                "maxTimeMS": 300000,
-                "cursor": {"batchSize": 1000}
-            }
-            
-            cursor = self._db.channel_catalog.aggregate(pipeline, **aggregation_options)
-            matched_files = []
-            
-            async for entry in cursor:
-                file_info = entry['file_info']
-                sanitized_name = file_info.get('sanitized_name', file_info.get('file_name', ''))
-                
-                if not await self.check_file_exists(file_info=file_info):
-                    matched_files.append({
-                        'message_id': entry['message_id'],
-                        'url': f"https://t.me/c/{str(channel_id)[4:]}/{entry['message_id']}",
-                        'filename': sanitized_name,
-                        'file_info': file_info
-                    })
-            
-            return matched_files
-            
+            pipeline = [
+                {"$match": {"channel_id": channel_id}},
+                {"$group": {
+                    "_id": None,
+                    "highest_msg_id": {"$max": "$message_id"},
+                    "lowest_msg_id": {"$min": "$message_id"},
+                    "total_files": {"$sum": 1}
+                }}
+            ]
+            result = await self._db.channel_catalog.aggregate(pipeline).to_list(1)
+            return result[0] if result else None
         except Exception as e:
-            LOGGER.error(f"Error in optimized catalog query: {e}")
-            return []
+            LOGGER.error(f"Error getting catalog bounds: {e}")
+            return None
 
     async def get_channel_metadata(self, channel_id):
         """Get channel scanning metadata"""
@@ -726,8 +663,8 @@ class DbManager:
             LOGGER.error(f"Error getting channel metadata: {e}")
             return None
 
-    async def update_channel_metadata(self, channel_id, latest_msg_id=None, total_cataloged=None, channel_username=None, catalog_status='incomplete'):
-        """Update channel metadata after scan with completion status"""
+    async def update_channel_metadata(self, channel_id, latest_msg_id=None, oldest_msg_id=None, total_cataloged=None, channel_username=None, catalog_status='incomplete'):
+        """Update channel metadata with both bounds tracking"""
         try:
             update_data = {
                 "last_incremental_scan": datetime.utcnow().isoformat(),
@@ -739,6 +676,8 @@ class DbManager:
             
             if latest_msg_id:
                 update_data["latest_message_id"] = latest_msg_id
+            if oldest_msg_id:
+                update_data["oldest_message_id"] = oldest_msg_id
             if total_cataloged is not None:
                 update_data["total_messages_cataloged"] = total_cataloged
             if channel_username:
@@ -751,24 +690,6 @@ class DbManager:
             )
         except Exception as e:
             LOGGER.error(f"Error updating channel metadata: {e}")
-
-    async def get_catalog_stats(self, channel_id):
-        """Get catalog statistics for a channel"""
-        try:
-            pipeline = [
-                {"$match": {"channel_id": channel_id}},
-                {"$group": {
-                    "_id": "$channel_id",
-                    "total_files": {"$sum": 1},
-                    "latest_message": {"$max": "$message_id"},
-                    "oldest_message": {"$min": "$message_id"}
-                }}
-            ]
-            result = await self._db.channel_catalog.aggregate(pipeline).to_list(1)
-            return result[0] if result else None
-        except Exception as e:
-            LOGGER.error(f"Error getting catalog stats: {e}")
-            return None
 
     async def ensure_catalog_indexes(self):
         """Create optimized database indexes for maximum performance"""
@@ -811,10 +732,10 @@ class DbManager:
                 ("status", 1)
             ], background=True, name="caption_status")
             
-            LOGGER.info("[DB] Created optimized catalog indexes")
+            LOGGER.info("Database indexes created successfully")
             
         except Exception as e:
-            pass  # Indexes likely already exist
+            pass
 
     @property
     def _return(self):
