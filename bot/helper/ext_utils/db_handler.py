@@ -482,8 +482,15 @@ class DbManager:
             LOGGER.error(f"[DB] Error adding catalog entry: {e}")
 
     async def get_catalog_files(self, channel_id, filter_tags=None, filter_mode='and', scan_type=None, from_msg_id=None, to_msg_id=None):
-        """Get files from catalog with enhanced filtering using sanitized names"""
+        """Get files from catalog with enhanced filtering using sanitized names - WITH DEBUG LOGGING"""
         try:
+            # DEBUG: Log database query parameters
+            LOGGER.info(f"[DB-catalog] DATABASE QUERY DEBUG:")
+            LOGGER.info(f"[DB-catalog] Channel ID: {channel_id}")
+            LOGGER.info(f"[DB-catalog] Filter tags: {filter_tags}")
+            LOGGER.info(f"[DB-catalog] Filter mode: {filter_mode}")
+            LOGGER.info(f"[DB-catalog] Scan type: {scan_type}")
+            
             query = {"channel_id": channel_id}
             
             # Apply message range filters
@@ -494,28 +501,58 @@ class DbManager:
                 if to_msg_id:
                     msg_range["$gte"] = to_msg_id
                 query["message_id"] = msg_range
+                LOGGER.info(f"[DB-catalog] Message range filter: {msg_range}")
             
             # Apply scan type filter
             if scan_type == 'document':
                 query["file_info.mime_type"] = {"$regex": "^(application/|text/)"}
+                LOGGER.info(f"[DB-catalog] Document type filter applied")
             elif scan_type == 'media':
                 query["file_info.mime_type"] = {"$regex": "^video/"}
+                LOGGER.info(f"[DB-catalog] Media type filter applied")
+            
+            LOGGER.info(f"[DB-catalog] MongoDB query: {query}")
             
             cursor = self._db.channel_catalog.find(query).sort("message_id", -1)
             
+            # DEBUG: Count total entries before filtering
+            total_before_filter = await self._db.channel_catalog.count_documents(query)
+            LOGGER.info(f"[DB-catalog] Total entries matching base query: {total_before_filter}")
+            
             matched_files = []
+            processed_count = 0
+            filter_rejected = 0
+            already_downloaded = 0
+            
             async for entry in cursor:
+                processed_count += 1
                 file_info = entry['file_info']
+                
+                # DEBUG: Log every 100th entry for progress
+                if processed_count % 100 == 0:
+                    LOGGER.info(f"[DB-catalog] Processed {processed_count} entries, found {len(matched_files)} matches so far")
                 
                 # Apply filter tags using ENHANCED search text
                 if filter_tags:
                     search_text = file_info.get('search_text', '').lower()
+                    
+                    # DEBUG: Log first few filter attempts
+                    if processed_count <= 5:
+                        LOGGER.info(f"[DB-catalog] Filter test #{processed_count}: '{search_text[:100]}...' vs tags {filter_tags}")
+                    
                     if filter_mode == 'or':
-                        if not any(tag.lower() in search_text for tag in filter_tags):
-                            continue
+                        tag_match = any(tag.lower() in search_text for tag in filter_tags)
                     else:  # 'and' mode
-                        if not all(tag.lower() in search_text for tag in filter_tags):
-                            continue
+                        tag_match = all(tag.lower() in search_text for tag in filter_tags)
+                    
+                    if not tag_match:
+                        filter_rejected += 1
+                        if processed_count <= 5:
+                            LOGGER.info(f"[DB-catalog] Filter REJECTED: No match found")
+                        continue
+                    
+                    if processed_count <= 5:
+                        LOGGER.info(f"[DB-catalog] Filter ACCEPTED: Match found!")
                 
                 # Use sanitized name for duplicate checking and downloads
                 sanitized_name = file_info.get('sanitized_name', file_info.get('file_name', ''))
@@ -528,11 +565,20 @@ class DbManager:
                         'filename': sanitized_name,  # Use sanitized name for download
                         'file_info': file_info  # Include enhanced file_info with sanitized_name
                     })
+                else:
+                    already_downloaded += 1
+            
+            # DEBUG: Log final statistics
+            LOGGER.info(f"[DB-catalog] FINAL FILTERING RESULTS:")
+            LOGGER.info(f"[DB-catalog] Total processed: {processed_count}")
+            LOGGER.info(f"[DB-catalog] Filter rejected: {filter_rejected}")
+            LOGGER.info(f"[DB-catalog] Already downloaded: {already_downloaded}")
+            LOGGER.info(f"[DB-catalog] Final matches: {len(matched_files)}")
             
             return matched_files
             
         except Exception as e:
-            LOGGER.error(f"[DB] Error getting catalog files: {e}")
+            LOGGER.error(f"[DB-catalog] Error getting catalog files: {e}", exc_info=True)
             return []
 
     async def get_channel_metadata(self, channel_id):
