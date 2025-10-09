@@ -279,6 +279,27 @@ class SimpleChannelLeechCoordinator(TaskListener):
             LOGGER.error(f"Error determining catalog mode: {e}")
             return 'full'
 
+    def _generate_clean_filename(self, file_info):
+        """Generate sanitized filename matching db_handler logic"""
+        original_filename = file_info.get('file_name', '')
+        
+        if self.use_caption_as_filename and file_info.get('caption_first_line'):
+            base_name = file_info['caption_first_line'].strip()
+        else:
+            base_name = original_filename
+        
+        clean_base = sanitize_filename(base_name)
+        
+        original_ext = os.path.splitext(original_filename)[1]
+        media_extensions = {'.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v',
+                            '.mp3', '.flac', '.wav', '.aac', '.m4a', '.ogg',
+                            '.zip', '.rar', '.7z', '.tar', '.gz'}
+                            
+        if original_ext.lower() in media_extensions and not clean_base.lower().endswith(original_ext.lower()):
+            clean_base += original_ext
+            
+        return clean_base
+
     async def _is_download_duplicate(self, file_item):
         """Enhanced duplicate checking with queue integration and failed file handling"""
         try:
@@ -858,6 +879,24 @@ class SimpleChannelLeechCoordinator(TaskListener):
             await self._save_progress(interrupted=True)
             raise
 
+    async def _start_next_download(self):
+        """Start next available download from pending queue"""
+        if not self.pending_files or len(self.our_active_links) >= self.max_concurrent:
+            return
+        
+        file_item = self.pending_files.pop(0)
+        file_url = file_item['url']
+        
+        self.our_active_links.add(file_url)
+        self.link_to_file_mapping[file_url] = file_item
+        
+        try:
+            await send_message(self.message, f"/leech {file_url}")
+        except Exception as e:
+            LOGGER.error(f"Failed to start download {file_url}: {e}")
+            self.our_active_links.discard(file_url)
+            self.link_to_file_mapping.pop(file_url, None)
+
     async def _handle_our_task_completion(self, link, name, size, files, folders, mime_type):
         """Handle completion of our tracked task - with database tracking"""
         try:
@@ -933,6 +972,274 @@ class SimpleChannelLeechCoordinator(TaskListener):
         except Exception as e:
             if "MESSAGE_NOT_MODIFIED" not in str(e):
                 LOGGER.error(f"Message edit error: {e}")
+
+    async def _save_progress(self, interrupted=False):
+        """Save current progress to database for resume capability"""
+        try:
+            progress_data = {
+                "scanned_message_ids": list(self.scanned_message_ids),
+                "completed_count": self.completed_count,
+                "failed_count": self.failed_count,
+                "pending_files": [item['message_id'] for item in self.pending_files],
+                "scan_type": self.scan_type,
+                "completed_scan_type": getattr(self, 'completed_scan_type', None),
+                "interrupted": interrupted,
+                "last_save": time.time(),
+                "filter_tags": self.filter_tags,
+                "filter_mode": self.filter_mode,
+                "from_msg_id": self.from_msg_id,
+                "to_msg_id": self.to_msg_id,
+                "use_caption_as_filename": self.use_caption_as_filename
+            }
+            await database.save_leech_progress(self.message.from_user.id, self.channel_id, progress_data)
+        except Exception as e:
+            LOGGER.error(f"Failed to save progress: {e}")
+
+    async def _restore_resume_state(self, scanner):
+        try:
+            progress = await database.get_leech_progress(self.message.from_user.id, self.channel_id)
+            if not progress: 
+                return
+            
+            pending_msg_ids = progress.get("pending_files", [])
+            for msg_id in pending_msg_ids:
+                try:
+                    message = await user.get_messages(self.channel_chat_id, msg_id)
+                    file_info = await scanner._extract_file_info(message)
+                    if file_info:
+                        message_link = f"https://t.me/c/{str(self.channel_chat_id)[4:]}/{msg_id}"
+                        self.pending_files.append({
+                            'url': message_link,
+                            'filename': file_info['file_name'],
+                            'message_id': msg_id,
+                            'file_info': file_info,
+                        })
+                        sanitized_name = self._generate_clean_filename(file_info)
+                        self.pending_sanitized_names.add(sanitized_name)
+                        if file_info.get('file_unique_id'):
+                            self.pending_file_ids.add(file_info['file_unique_id'])
+                except Exception as e:
+                    LOGGER.warning(f"Could not restore pending file {msg_id}: {e}")
+            
+            bot_token_first_half = config_dict['BOT_TOKEN'].split(':')[0]
+            if await database._db.tasks[bot_token_first_half].find_one():
+                rows = database._db.tasks[bot_token_first_half].find({})
+                async for row in rows:
+                    if row["_id"].startswith("https://t.me/c/"):
+                        self.our_active_links.add(row["_id"])
+        except Exception as e:
+            LOGGER.error(f"Error restoring resume state: {e}")
+
+    async def _process_batch_with_skip_tracking(self, message_batch, scanner, processed_so_far):
+        skip_counts = {'filter': 0, 'existing': 0, 'queued': 0}
+        
+        for message in message_batch:
+            if self.is_cancelled:
+                break
+                
+            try:
+                file_info = await scanner._extract_file_info(message)
+                if not file_info:
+                    continue
+                
+                if not self._check_filter_match(file_info['search_text']):
+                    skip_counts['filter'] += 1
+                    continue
+
+                sanitized_name = self._generate_clean_filename(file_info)
+                file_unique_id = file_info.get('file_unique_id')
+                
+                if await database.check_file_exists(file_info=file_info):
+                    skip_counts['existing'] += 1
+                    continue
+                    
+                if sanitized_name in self.pending_sanitized_names:
+                    skip_counts['queued'] += 1
+                    continue
+                    
+                if file_unique_id and file_unique_id in self.pending_file_ids:
+                    skip_counts['queued'] += 1
+                    continue
+                    
+                message_link = f"https://t.me/c/{str(self.channel_chat_id)[4:]}/{message.id}"
+                self.pending_files.append({
+                    'url': message_link,
+                    'filename': file_info['file_name'],
+                    'message_id': message.id,
+                    'file_info': file_info,
+                })
+                self.pending_sanitized_names.add(sanitized_name)
+                if file_unique_id:
+                    self.pending_file_ids.add(file_unique_id)
+                    
+                while len(self.our_active_links) < self.max_concurrent and self.pending_files:
+                    await self._start_next_download()
+                    
+            except Exception as e:
+                LOGGER.error(f"Error processing message {message.id}: {e}")
+        
+        return skip_counts
+
+    async def _wait_for_completion_callback_mode(self):
+        """Wait for completion using TaskListener callbacks with periodic status updates"""
+        last_status_update = 0
+        status_update_interval = 10
+        start_time = time.time()
+        
+        while (self.our_active_links or self.pending_files) and not self.is_cancelled:
+            while len(self.our_active_links) < self.max_concurrent and self.pending_files:
+                await self._start_next_download()
+            
+            current_time = time.time()
+            
+            if current_time - last_status_update >= status_update_interval:
+                try:
+                    total_pending = len(self.our_active_links) + len(self.pending_files)
+                    
+                    if total_pending > 0:
+                        total_processed = self.completed_count + self.failed_count
+                        total_started = total_processed + total_pending
+                        progress_percent = (total_processed / total_started * 100) if total_started > 0 else 0
+                        
+                        elapsed_time = current_time - start_time
+                        downloads_per_minute = (total_processed / elapsed_time * 60) if elapsed_time > 0 else 0
+                        
+                        eta_minutes = (total_pending / downloads_per_minute) if downloads_per_minute > 0 else 0
+                        eta_text = f" (ETA: {eta_minutes:.1f}m)" if eta_minutes > 0 and eta_minutes < 300 else ""
+                        
+                        scan_type_text = f" {self.scan_type}" if self.scan_type else ""
+                        
+                        if self.catalog_mode == 'filter_only':
+                            status_text = (
+                                f"**✅ Catalog processed! Downloads in progress...**\n\n"
+                                f"**📊 Progress: {progress_percent:.1f}% ({total_processed}/{total_started})**\n"
+                                f"**Active:** {len(self.our_active_links)}/{self.max_concurrent} | **Queued:** {len(self.pending_files)}\n"
+                                f"**Completed:** {self.completed_count} | **Failed:** {self.failed_count}\n"
+                                f"**Rate:** {downloads_per_minute:.1f} files/min{eta_text}\n\n"
+                                f"**Filter:** {self._get_filter_description()}\n"
+                                f"**Range:** {self._get_range_description()}\n\n"
+                                f"**⏳ Processing remaining {total_pending} downloads...**"
+                            )
+                        else:
+                            status_text = (
+                                f"**✅{scan_type_text.title()} scan completed! Downloads in progress...**\n\n"
+                                f"**📊 Progress: {progress_percent:.1f}% ({total_processed}/{total_started})**\n"
+                                f"**Active:** {len(self.our_active_links)}/{self.max_concurrent} | **Queued:** {len(self.pending_files)}\n"
+                                f"**Completed:** {self.completed_count} | **Failed:** {self.failed_count}\n"
+                                f"**Rate:** {downloads_per_minute:.1f} files/min{eta_text}\n\n"
+                                f"**Filter:** {self._get_filter_description()}\n"
+                                f"**Range:** {self._get_range_description()}\n\n"
+                                f"**⏳ Processing remaining {total_pending} downloads...**"
+                            )
+                        
+                        await self._safe_edit_message(self.status_message, status_text)
+                        last_status_update = current_time
+                        
+                except Exception as e:
+                    LOGGER.error(f"Error updating status during downloads: {e}")
+            
+            await asyncio.sleep(10)
+
+    async def _show_final_results(self, total_processed, filter_rejected):
+        """Show final completion results"""
+        try:
+            elapsed_time = (datetime.now() - self.start_time).total_seconds()
+            hours = int(elapsed_time // 3600)
+            minutes = int((elapsed_time % 3600) // 60)
+            seconds = int(elapsed_time % 60)
+            
+            time_str = ""
+            if hours > 0:
+                time_str += f"{hours}h "
+            if minutes > 0:
+                time_str += f"{minutes}m "
+            time_str += f"{seconds}s"
+            
+            total_files = self.completed_count + self.failed_count
+            
+            catalog_text = ""
+            if self.catalog_mode == 'filter_only':
+                catalog_text = " (Catalog Mode)"
+            elif self.catalog_mode == 'incremental':
+                catalog_text = " (Incremental Mode)"
+            
+            completion_text = f"**✅ Channel Leech Completed!{catalog_text}**\n\n"
+            completion_text += f"**📊 Processing Results:**\n"
+            completion_text += f"**Files analyzed:** {total_processed:,}\n"
+            if filter_rejected > 0:
+                completion_text += f"**Filter rejections:** {filter_rejected:,}\n"
+            completion_text += f"**Downloads attempted:** {total_files}\n"
+            completion_text += f"**Successful:** {self.completed_count} | **Failed:** {self.failed_count}\n\n"
+            completion_text += f"**📈 Success Rate:** {(self.completed_count/total_files*100) if total_files > 0 else 0:.1f}%\n"
+            completion_text += f"**⏱️ Total Time:** {time_str}\n\n"
+            completion_text += f"**Filter:** {self._get_filter_description()}\n"
+            completion_text += f"**Range:** {self._get_range_description()}"
+            
+            if self.catalog_mode == 'filter_only':
+                completion_text += f"\n\n**⚡ Mode:** Used existing catalog (super fast!)"
+            elif self.catalog_mode == 'incremental':
+                completion_text += f"\n\n**📈 Mode:** Incremental update (new messages only)"
+            else:
+                completion_text += f"\n\n**🗄️ Mode:** Full scan with catalog building"
+            
+            await self._safe_edit_message(self.status_message, completion_text)
+        except Exception as e:
+            LOGGER.error(f"Error showing final results: {e}")
+
+    def _parse_arguments(self, args):
+        """Parse command line arguments"""
+        parsed = {}
+        i = 0
+        while i < len(args):
+            arg = args[i].lower()
+            if arg in ['-ch', '-channel']:
+                i += 1
+                if i < len(args):
+                    parsed['channel'] = args[i]
+            elif arg == '-f':
+                filter_tags = []
+                i += 1
+                while i < len(args) and not args[i].startswith('-'):
+                    filter_tags.append(args[i])
+                    i += 1
+                i -= 1
+                if filter_tags:
+                    parsed['filter'] = filter_tags
+                    parsed['filter_mode'] = 'and'
+            elif arg == '-feither':
+                filter_tags = []
+                i += 1
+                while i < len(args) and not args[i].startswith('-'):
+                    filter_tags.append(args[i])
+                    i += 1
+                i -= 1
+                if filter_tags:
+                    parsed['filter'] = filter_tags
+                    parsed['filter_mode'] = 'or'
+            elif arg == '--no-caption':
+                parsed['no_caption'] = True
+            elif arg == '-type':
+                i += 1
+                if i < len(args):
+                    scan_type = args[i].lower()
+                    if scan_type in ['document', 'media']:
+                        parsed['type'] = scan_type
+            elif arg == '-from':
+                i += 1
+                if i < len(args):
+                    try:
+                        parsed['from_msg_id'] = int(args[i])
+                    except ValueError:
+                        pass
+            elif arg == '-to':
+                i += 1
+                if i < len(args):
+                    try:
+                        parsed['to_msg_id'] = int(args[i])
+                    except ValueError:
+                        pass
+            i += 1
+        return parsed
 
     async def new_event(self):
         text = self.message.text.split()
@@ -1055,131 +1362,15 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 await self._full_scan_and_catalog()
                 return
 
-    async def _wait_for_completion_callback_mode(self):
-        """Wait for completion using TaskListener callbacks with periodic status updates"""
-        last_status_update = 0
-        status_update_interval = 10
-        start_time = time.time()
-        
-        while (self.our_active_links or self.pending_files) and not self.is_cancelled:
-            while len(self.our_active_links) < self.max_concurrent and self.pending_files:
-                await self._start_next_download()
-            
-            current_time = time.time()
-            
-            if current_time - last_status_update >= status_update_interval:
-                try:
-                    total_pending = len(self.our_active_links) + len(self.pending_files)
-                    
-                    if total_pending > 0:
-                        total_processed = self.completed_count + self.failed_count
-                        total_started = total_processed + total_pending
-                        progress_percent = (total_processed / total_started * 100) if total_started > 0 else 0
-                        
-                        elapsed_time = current_time - start_time
-                        downloads_per_minute = (total_processed / elapsed_time * 60) if elapsed_time > 0 else 0
-                        
-                        eta_minutes = (total_pending / downloads_per_minute) if downloads_per_minute > 0 else 0
-                        eta_text = f" (ETA: {eta_minutes:.1f}m)" if eta_minutes > 0 and eta_minutes < 300 else ""
-                        
-                        scan_type_text = f" {self.scan_type}" if self.scan_type else ""
-                        
-                        if self.catalog_mode == 'filter_only':
-                            status_text = (
-                                f"**✅ Catalog processed! Downloads in progress...**\n\n"
-                                f"**📊 Progress: {progress_percent:.1f}% ({total_processed}/{total_started})**\n"
-                                f"**Active:** {len(self.our_active_links)}/{self.max_concurrent} | **Queued:** {len(self.pending_files)}\n"
-                                f"**Completed:** {self.completed_count} | **Failed:** {self.failed_count}\n"
-                                f"**Rate:** {downloads_per_minute:.1f} files/min{eta_text}\n\n"
-                                f"**Filter:** {self._get_filter_description()}\n"
-                                f"**Range:** {self._get_range_description()}\n\n"
-                                f"**⏳ Processing remaining {total_pending} downloads...**"
-                            )
-                        else:
-                            status_text = (
-                                f"**✅{scan_type_text.title()} scan completed! Downloads in progress...**\n\n"
-                                f"**📊 Progress: {progress_percent:.1f}% ({total_processed}/{total_started})**\n"
-                                f"**Active:** {len(self.our_active_links)}/{self.max_concurrent} | **Queued:** {len(self.pending_files)}\n"
-                                f"**Completed:** {self.completed_count} | **Failed:** {self.failed_count}\n"
-                                f"**Rate:** {downloads_per_minute:.1f} files/min{eta_text}\n\n"
-                                f"**Filter:** {self._get_filter_description()}\n"
-                                f"**Range:** {self._get_range_description()}\n\n"
-                                f"**⏳ Processing remaining {total_pending} downloads...**"
-                            )
-                        
-                        await self._safe_edit_message(self.status_message, status_text)
-                        last_status_update = current_time
-                        
-                except Exception as e:
-                    LOGGER.error(f"Error updating status during downloads: {e}")
-            
-            await asyncio.sleep(10)
+@new_task
+async def channel_leech(client, message):
+    SimpleChannelLeechCoordinator._task_listens()
+    coordinator = SimpleChannelLeechCoordinator(client, message)
+    await coordinator.new_event()
 
-    async def _restore_resume_state(self, scanner):
-        try:
-            progress = await database.get_leech_progress(self.message.from_user.id, self.channel_id)
-            if not progress: 
-                return
-            
-            pending_msg_ids = progress.get("pending_files", [])
-            for msg_id in pending_msg_ids:
-                try:
-                    message = await user.get_messages(self.channel_chat_id, msg_id)
-                    file_info = await scanner._extract_file_info(message)
-                    if file_info:
-                        message_link = f"https://t.me/c/{str(self.channel_chat_id)[4:]}/{msg_id}"
-                        self.pending_files.append({
-                            'url': message_link,
-                            'filename': file_info['file_name'],
-                            'message_id': msg_id,
-                            'file_info': file_info,
-                        })
-                        sanitized_name = self._generate_clean_filename(file_info)
-                        self.pending_sanitized_names.add(sanitized_name)
-                        if file_info.get('file_unique_id'):
-                            self.pending_file_ids.add(file_info['file_unique_id'])
-                except Exception as e:
-                    LOGGER.warning(f"Could not restore pending file {msg_id}: {e}")
-            
-            bot_token_first_half = config_dict['BOT_TOKEN'].split(':')[0]
-            if await database._db.tasks[bot_token_first_half].find_one():
-                rows = database._db.tasks[bot_token_first_half].find({})
-                async for row in rows:
-                    if row["_id"].startswith("https://t.me/c/"):
-                        self.our_active_links.add(row["_id"])
-        except Exception as e:
-            LOGGER.error(f"Error restoring resume state: {e}")
-
-    async def _process_batch_with_skip_tracking(self, message_batch, scanner, processed_so_far):
-        skip_counts = {'filter': 0, 'existing': 0, 'queued': 0}
-        
-        for message in message_batch:
-            if self.is_cancelled:
-                break
-                
-            try:
-                file_info = await scanner._extract_file_info(message)
-                if not file_info:
-                    continue
-                
-                if not self._check_filter_match(file_info['search_text']):
-                    skip_counts['filter'] += 1
-                    continue
-
-                sanitized_name = self._generate_clean_filename(file_info)
-                file_unique_id = file_info.get('file_unique_id')
-                
-                if await database.check_file_exists(file_info=file_info):
-                    skip_counts['existing'] += 1
-                    continue
-                    
-                if sanitized_name in self.pending_sanitized_names:
-                    skip_counts['queued'] += 1
-                    continue
-                    
-                if file_unique_id and file_unique_id in self.pending_file_ids:
-                    skip_counts['queued'] += 1
-                    continue
-                    
-                message_link = f"https://t.me/c/{str(self.channel_chat_id)[4:]}/{message.id}"
-                self.pending_files
+bot.add_handler(
+    MessageHandler(
+        channel_leech, 
+        filters=command("cleech") & CustomFilters.authorized
+    )
+)
