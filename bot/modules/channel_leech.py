@@ -336,35 +336,76 @@ class SimpleChannelLeechCoordinator(TaskListener):
             return False
 
     async def _process_from_catalog(self):
-        """Process files directly from catalog with current filters and enhanced duplicate prevention"""
+        """Process files directly from catalog with current filters and live progress updates"""
         try:
             await self._safe_edit_message(self.status_message, 
-                "**🗄️ Loading files from catalog...**\n\n"
+                "**🗄️ Loading catalog statistics...**\n\n"
                 f"**Filter:** {self._get_filter_description()}")
             
-            # Get catalog statistics and filtered files
+            # Get catalog statistics first
             catalog_stats = await database.get_catalog_stats(self.channel_chat_id)
             total_catalog_files = catalog_stats.get('total_files', 0) if catalog_stats else 0
+            
+            # Initialize progress tracking
+            self.catalog_start_time = time.time()
+            self.catalog_processed_count = 0
+            self.catalog_matched_count = 0
+            self.catalog_downloaded_count = 0
             
             await self._safe_edit_message(self.status_message, 
                 f"**🗄️ Processing catalog ({total_catalog_files:,} total files)...**\n\n"
                 f"**Filter:** {self._get_filter_description()}\n"
-                f"**Range:** {self._get_range_description()}")
+                f"**Range:** {self._get_range_description()}\n\n"
+                f"**📊 Initializing catalog scan...**")
             
-            # Get filtered files with statistics
+            # Define progress callback for live updates
+            async def catalog_progress_callback(processed, total, matched, downloaded):
+                try:
+                    self.catalog_processed_count = processed
+                    self.catalog_matched_count = matched
+                    self.catalog_downloaded_count = downloaded
+                    
+                    # Calculate progress statistics
+                    progress_percent = (processed / total * 100) if total > 0 else 0
+                    elapsed_time = time.time() - self.catalog_start_time
+                    processing_rate = processed / elapsed_time if elapsed_time > 0 else 0
+                    
+                    # Estimate remaining time
+                    remaining = total - processed
+                    eta_seconds = (remaining / processing_rate) if processing_rate > 0 else 0
+                    eta_text = f" (ETA: {eta_seconds/60:.1f}m)" if eta_seconds > 0 and eta_seconds < 3600 else ""
+                    
+                    scan_type_text = f" {self.scan_type}" if self.scan_type else ""
+                    
+                    await self._safe_edit_message(self.status_message,
+                        f"**🗄️ Processing{scan_type_text} catalog... ({processed:,}/{total:,} - {progress_percent:.1f}%)**\n\n"
+                        f"**Filter:** {self._get_filter_description()}\n"
+                        f"**Range:** {self._get_range_description()}\n\n"
+                        f"**📊 Live Progress:**\n"
+                        f"**Processed:** {processed:,} files | **Rate:** {processing_rate:.1f} files/s{eta_text}\n"
+                        f"**Filter matches:** {matched:,}\n"
+                        f"**Already downloaded:** {downloaded:,}\n"
+                        f"**Available for download:** {matched - downloaded:,}"
+                    )
+                except Exception as e:
+                    # Don't let progress update errors break the main process
+                    LOGGER.error(f"[cleech] Error updating catalog progress: {e}")
+            
+            # Get filtered files with live progress updates
             catalog_files, catalog_statistics = await database.get_catalog_files_with_stats(
                 channel_id=self.channel_chat_id,
                 filter_tags=self.filter_tags,
                 filter_mode=self.filter_mode,
                 scan_type=self.scan_type,
                 from_msg_id=self.from_msg_id,
-                to_msg_id=self.to_msg_id
+                to_msg_id=self.to_msg_id,
+                progress_callback=catalog_progress_callback
             )
             
             self.pending_files = catalog_files
             total_found = len(catalog_files)
             
-            # Extract statistics
+            # Extract detailed statistics
             total_processed = catalog_statistics.get('total_processed', 0)
             filter_rejected = catalog_statistics.get('filter_rejected', 0)
             already_downloaded = catalog_statistics.get('already_downloaded', 0)
@@ -373,36 +414,47 @@ class SimpleChannelLeechCoordinator(TaskListener):
             filter_match_rate = ((total_processed - filter_rejected) / total_processed * 100) if total_processed > 0 else 0
             
             # Pre-filter duplicates to prevent queue conflicts
-            original_count = len(self.pending_files)
             filtered_files = []
             duplicate_count = 0
             
-            for file_item in self.pending_files:
+            # Show duplicate filtering progress
+            if len(self.pending_files) > 0:
+                await self._safe_edit_message(self.status_message,
+                    f"**🗄️ Catalog scan completed! Checking for duplicates...**\n\n"
+                    f"**📊 Catalog Results:**\n"
+                    f"**Total processed:** {total_processed:,}\n"
+                    f"**Filter matches:** {total_processed - filter_rejected:,}\n"
+                    f"**Already downloaded:** {already_downloaded:,}\n"
+                    f"**Checking {len(self.pending_files):,} files for queue duplicates...**"
+                )
+            
+            for i, file_item in enumerate(self.pending_files):
+                # Update progress every 100 files
+                if i > 0 and i % 100 == 0:
+                    await self._safe_edit_message(self.status_message,
+                        f"**🗄️ Checking duplicates... ({i:,}/{len(self.pending_files):,})**\n\n"
+                        f"**Queue duplicates found:** {duplicate_count}\n"
+                        f"**Remaining to check:** {len(self.pending_files) - i:,}"
+                    )
+                
                 if not await self._is_download_duplicate(file_item):
                     filtered_files.append(file_item)
                 else:
                     duplicate_count += 1
             
             self.pending_files = filtered_files
-            
-            # Update statistics with separate duplicate tracking
             catalog_statistics['duplicate_rejected'] = duplicate_count
             total_found = len(self.pending_files)
             
             if total_found == 0:
-                scan_type_text = f" {self.scan_type}" if self.scan_type else ""
-                # Extract detailed statistics for display
-                filter_rejected = catalog_statistics.get('filter_rejected', 0)
-                already_downloaded = catalog_statistics.get('already_downloaded', 0)
-                duplicate_rejected = catalog_statistics.get('duplicate_rejected', 0)
-                
+                # Show detailed "no results" message
                 await self._safe_edit_message(self.status_message, 
                     f"**✅ Catalog processed! No matching files found for download**\n\n"
                     f"**📊 Detailed Statistics:**\n"
-                    f"**Total{scan_type_text} files processed:** {total_processed:,}\n"
+                    f"**Total files processed:** {total_processed:,}\n"
                     f"**Filter rejections:** {filter_rejected:,}\n"
                     f"**Already downloaded:** {already_downloaded:,}\n"
-                    f"**Queue duplicates:** {duplicate_rejected:,}\n"
+                    f"**Queue duplicates:** {duplicate_count:,}\n"
                     f"**Available for download:** {total_found} files\n\n"
                     f"**📈 Filter match rate:** {filter_match_rate:.1f}%\n\n"
                     f"**Filter:** {self._get_filter_description()}\n"
@@ -423,22 +475,18 @@ class SimpleChannelLeechCoordinator(TaskListener):
             while len(self.our_active_links) < self.max_concurrent and self.pending_files:
                 await self._start_next_download()
             
-            # Show completion status with statistics
+            # Show completion status with detailed statistics
             total_pending = len(self.our_active_links) + len(self.pending_files)
             scan_type_text = f" {self.scan_type}" if self.scan_type else ""
-            
-            # Extract detailed statistics for display
-            filter_rejected = catalog_statistics.get('filter_rejected', 0)
-            already_downloaded = catalog_statistics.get('already_downloaded', 0)
-            duplicate_rejected = catalog_statistics.get('duplicate_rejected', 0)
+            catalog_time = time.time() - self.catalog_start_time
             
             await self._safe_edit_message(self.status_message, 
                 f"**✅ Catalog processed! Found {total_found:,} files for download**\n\n"
                 f"**📊 Detailed Statistics:**\n"
-                f"**Total{scan_type_text} files processed:** {total_processed:,}\n"
+                f"**Total{scan_type_text} files processed:** {total_processed:,} ({catalog_time:.1f}s)\n"
                 f"**Filter rejections:** {filter_rejected:,}\n"
                 f"**Already downloaded:** {already_downloaded:,}\n"
-                f"**Queue duplicates:** {duplicate_rejected:,}\n"
+                f"**Queue duplicates:** {duplicate_count:,}\n"
                 f"**Available for download:** {total_found:,} files\n\n"
                 f"**📈 Filter match rate:** {filter_match_rate:.1f}%\n\n"
                 f"**Filter:** {self._get_filter_description()}\n"
@@ -448,7 +496,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 f"**⏳ Waiting for queued processes to complete...**"
             )
             
-            # Wait for completion silently
+            # Wait for completion with live updates
             await self._wait_for_completion_callback_mode()
             await self._show_final_results(total_processed, filter_rejected)
             
