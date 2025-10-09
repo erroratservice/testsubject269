@@ -637,6 +637,73 @@ class DbManager:
             LOGGER.error(f"Error in optimized catalog query with stats: {e}")
             return [], {'total_processed': 0, 'filter_rejected': 0, 'already_downloaded': 0, 'type_filtered': 0, 'range_filtered': 0, 'duplicate_rejected': 0}
 
+    async def get_catalog_files(self, channel_id, filter_tags=None, filter_mode='and', scan_type=None, from_msg_id=None, to_msg_id=None):
+        """Get files from catalog with enhanced filtering"""
+        try:
+            pipeline = []
+            match_stage = {"channel_id": channel_id}
+            
+            if from_msg_id or to_msg_id:
+                msg_range = {}
+                if from_msg_id:
+                    msg_range["$lte"] = from_msg_id
+                if to_msg_id:
+                    msg_range["$gte"] = to_msg_id
+                match_stage["message_id"] = msg_range
+            
+            if scan_type == 'document':
+                match_stage["file_info.mime_type"] = {"$regex": "^(application/|text/)"}
+            elif scan_type == 'media':
+                match_stage["file_info.mime_type"] = {"$regex": "^video/"}
+            
+            pipeline.append({"$match": match_stage})
+            
+            if filter_tags:
+                if filter_mode == 'or':
+                    or_conditions = []
+                    for tag in filter_tags:
+                        or_conditions.append({"file_info.search_text": {"$regex": re.escape(tag), "$options": "i"}})
+                    pipeline.append({"$match": {"$or": or_conditions}})
+                else:
+                    for tag in filter_tags:
+                        pipeline.append({"$match": {"file_info.search_text": {"$regex": re.escape(tag), "$options": "i"}}})
+            
+            pipeline.append({"$sort": {"message_id": -1}})
+            pipeline.append({
+                "$project": {
+                    "_id": 1,
+                    "message_id": 1,
+                    "file_info": 1
+                }
+            })
+            
+            aggregation_options = {
+                "allowDiskUse": True,
+                "maxTimeMS": 300000,
+                "cursor": {"batchSize": 1000}
+            }
+            
+            cursor = self._db.channel_catalog.aggregate(pipeline, **aggregation_options)
+            matched_files = []
+            
+            async for entry in cursor:
+                file_info = entry['file_info']
+                sanitized_name = file_info.get('sanitized_name', file_info.get('file_name', ''))
+                
+                if not await self.check_file_exists(file_info=file_info):
+                    matched_files.append({
+                        'message_id': entry['message_id'],
+                        'url': f"https://t.me/c/{str(channel_id)[4:]}/{entry['message_id']}",
+                        'filename': sanitized_name,
+                        'file_info': file_info
+                    })
+            
+            return matched_files
+            
+        except Exception as e:
+            LOGGER.error(f"Error in optimized catalog query: {e}")
+            return []
+
     async def get_catalog_bounds(self, channel_id):
         """Get the actual highest and lowest message IDs in catalog"""
         try:
@@ -690,6 +757,24 @@ class DbManager:
             )
         except Exception as e:
             LOGGER.error(f"Error updating channel metadata: {e}")
+
+    async def get_catalog_stats(self, channel_id):
+        """Get catalog statistics for a channel"""
+        try:
+            pipeline = [
+                {"$match": {"channel_id": channel_id}},
+                {"$group": {
+                    "_id": "$channel_id",
+                    "total_files": {"$sum": 1},
+                    "latest_message": {"$max": "$message_id"},
+                    "oldest_message": {"$min": "$message_id"}
+                }}
+            ]
+            result = await self._db.channel_catalog.aggregate(pipeline).to_list(1)
+            return result[0] if result else None
+        except Exception as e:
+            LOGGER.error(f"Error getting catalog stats: {e}")
+            return None
 
     async def ensure_catalog_indexes(self):
         """Create optimized database indexes for maximum performance"""
