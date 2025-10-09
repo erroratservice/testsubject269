@@ -259,8 +259,19 @@ class SimpleChannelLeechCoordinator(TaskListener):
     async def _determine_catalog_mode(self):
         """Determine the best scanning strategy with interruption handling"""
         try:
+            # DEBUG: Log catalog mode determination
+            LOGGER.info(f"[cleech-catalog] DETERMINING CATALOG MODE:")
+            LOGGER.info(f"[cleech-catalog] Channel: {self.channel_id} (chat_id: {self.channel_chat_id})")
+            
             metadata = await database.get_channel_metadata(self.channel_chat_id)
             catalog_stats = await database.get_catalog_stats(self.channel_chat_id)
+            
+            # DEBUG: Log metadata and stats
+            LOGGER.info(f"[cleech-catalog] Metadata exists: {metadata is not None}")
+            LOGGER.info(f"[cleech-catalog] Catalog stats exists: {catalog_stats is not None}")
+            if metadata:
+                LOGGER.info(f"[cleech-catalog] Catalog status: {metadata.get('catalog_status', 'unknown')}")
+                LOGGER.info(f"[cleech-catalog] Last full scan: {metadata.get('last_full_scan', 'never')}")
             
             if not metadata or not catalog_stats:
                 # No catalog exists - need full scan
@@ -291,11 +302,20 @@ class SimpleChannelLeechCoordinator(TaskListener):
             LOGGER.error(f"[cleech-catalog] Error determining catalog mode: {e}")
             return 'full'
     async def _process_from_catalog(self):
-        """Process files directly from catalog with current filters"""
+        """Process files directly from catalog with current filters - WITH DEBUG LOGGING"""
         try:
             await self._safe_edit_message(self.status_message, 
                 "**🗄️ Loading files from catalog...**\n\n"
                 f"**Filter:** {self._get_filter_description()}")
+            
+            # DEBUG: Log filter details
+            LOGGER.info(f"[cleech-catalog] CATALOG FILTER DEBUG:")
+            LOGGER.info(f"[cleech-catalog] Channel ID: {self.channel_chat_id}")
+            LOGGER.info(f"[cleech-catalog] Filter tags: {self.filter_tags}")
+            LOGGER.info(f"[cleech-catalog] Filter mode: {self.filter_mode}")
+            LOGGER.info(f"[cleech-catalog] Scan type: {self.scan_type}")
+            LOGGER.info(f"[cleech-catalog] From message ID: {self.from_msg_id}")
+            LOGGER.info(f"[cleech-catalog] To message ID: {self.to_msg_id}")
             
             # Get filtered files from catalog
             catalog_files = await database.get_catalog_files(
@@ -310,15 +330,29 @@ class SimpleChannelLeechCoordinator(TaskListener):
             self.pending_files = catalog_files
             total_found = len(catalog_files)
             
+            # DEBUG: Log catalog results
+            LOGGER.info(f"[cleech-catalog] CATALOG RESULTS:")
+            LOGGER.info(f"[cleech-catalog] Total files found in catalog: {total_found}")
+            
             if total_found == 0:
+                # DEBUG: Check what's actually in the catalog
+                await self._debug_catalog_contents()
+                
                 await self._safe_edit_message(self.status_message, 
                     f"**✅ Catalog loaded! No matching files found**\n\n"
                     f"**Filter:** {self._get_filter_description()}\n"
                     f"**Range:** {self._get_range_description()}\n\n"
-                    f"**📥 All matching files already downloaded or filtered out**"
+                    f"**📥 All matching files already downloaded or filtered out**\n"
+                    f"**Debug:** Check logs for catalog analysis"
                 )
                 await self._show_final_results(0, 0)
                 return
+            
+            # DEBUG: Log first few results
+            LOGGER.info(f"[cleech-catalog] First 3 matching files:")
+            for i, file_item in enumerate(catalog_files[:3]):
+                file_info = file_item['file_info']
+                LOGGER.info(f"[cleech-catalog] {i+1}. {file_info.get('file_name', 'Unknown')} | Search: {file_info.get('search_text', 'No search text')[:100]}...")
             
             # Track files in our sets to prevent duplicates
             for file_item in self.pending_files:
@@ -350,8 +384,60 @@ class SimpleChannelLeechCoordinator(TaskListener):
             await self._show_final_results(0, 0)
             
         except Exception as e:
-            LOGGER.error(f"[cleech-catalog] Error processing from catalog: {e}")
+            LOGGER.error(f"[cleech-catalog] Error processing from catalog: {e}", exc_info=True)
             raise
+
+    async def _debug_catalog_contents(self):
+        """Debug method to analyze catalog contents when no matches found"""
+        try:
+            LOGGER.info(f"[cleech-catalog] DEBUGGING CATALOG CONTENTS:")
+            
+            # Get total catalog entries for this channel
+            total_catalog = await database.get_catalog_stats(self.channel_chat_id)
+            LOGGER.info(f"[cleech-catalog] Total catalog entries: {total_catalog}")
+            
+            # Get sample of catalog entries without filters
+            sample_files = await database.get_catalog_files(
+                channel_id=self.channel_chat_id,
+                filter_tags=None,  # No filters
+                filter_mode='and',
+                scan_type=None,
+                from_msg_id=None,
+                to_msg_id=None
+            )
+            
+            sample_count = min(10, len(sample_files))
+            LOGGER.info(f"[cleech-catalog] Sample {sample_count} catalog entries:")
+            
+            for i, file_item in enumerate(sample_files[:10]):
+                file_info = file_item['file_info']
+                search_text = file_info.get('search_text', 'No search text')
+                LOGGER.info(f"[cleech-catalog] Sample {i+1}: {file_info.get('file_name', 'Unknown')} | Search: {search_text[:150]}...")
+            
+            # Test filter matching manually
+            if self.filter_tags:
+                LOGGER.info(f"[cleech-catalog] TESTING FILTER MATCHING:")
+                LOGGER.info(f"[cleech-catalog] Looking for tags: {self.filter_tags} (mode: {self.filter_mode})")
+                
+                matches_found = 0
+                for file_item in sample_files[:50]:  # Test first 50
+                    file_info = file_item['file_info']
+                    search_text = file_info.get('search_text', '').lower()
+                    
+                    if self.filter_mode == 'or':
+                        match = any(tag.lower() in search_text for tag in self.filter_tags)
+                    else:
+                        match = all(tag.lower() in search_text for tag in self.filter_tags)
+                    
+                    if match:
+                        matches_found += 1
+                        if matches_found <= 3:  # Log first 3 matches
+                            LOGGER.info(f"[cleech-catalog] MATCH FOUND: {file_info.get('file_name', 'Unknown')} | Search: {search_text[:100]}...")
+                
+                LOGGER.info(f"[cleech-catalog] Manual filter test found {matches_found} matches in first 50 entries")
+            
+        except Exception as e:
+            LOGGER.error(f"[cleech-catalog] Error in debug catalog contents: {e}", exc_info=True)    
 
     async def _incremental_scan_and_catalog(self):
         """Scan only new messages since last catalog update"""
