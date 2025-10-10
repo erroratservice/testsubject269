@@ -1195,56 +1195,49 @@ class SimpleChannelLeechCoordinator(TaskListener):
         return skip_counts
 
     async def _start_next_download(self):
-        """Enhanced download starter with comprehensive duplicate checking"""
+        """Start next download - files are pre-filtered, no duplicate check needed"""
         if not self.pending_files or len(self.our_active_links) >= self.max_concurrent:
             return
         
-        # Find next non-duplicate file
-        while self.pending_files:
-            file_item = self.pending_files.pop(0)
+        # Files in pending_files are already verified non-duplicates
+        # Just pop and send - no need to check again
+        file_item = self.pending_files.pop(0)
+        
+        # Add to tracking
+        sanitized_name = self._generate_clean_filename(file_item['file_info'])
+        url = file_item['url']
+        
+        # Files are already in pending sets from when added to queue
+        # Just add to active links
+        self.our_active_links.add(url)
+        self.link_to_file_mapping[url] = file_item
+        
+        try:
+            COMMAND_CHANNEL_ID = int(config_dict.get('LEECH_DUMP_CHAT') or self.message.chat.id)
+            clean_name = self._generate_clean_filename(file_item['file_info'])
+            leech_cmd = f'/leech {file_item["url"]} -n {clean_name}'
             
-            # Comprehensive duplicate check
-            if await self._is_download_duplicate(file_item):
-                continue
+            command_message = await user.send_message(chat_id=COMMAND_CHANNEL_ID, text=leech_cmd)
+            actual_stored_url = f"https://t.me/c/{str(COMMAND_CHANNEL_ID)[4:]}/{command_message.id}"
             
-            # Add to tracking before starting
-            sanitized_name = self._generate_clean_filename(file_item['file_info'])
-            url = file_item['url']
+            await asyncio.sleep(2)
             
-            self.pending_sanitized_names.add(sanitized_name)
+            # Update tracking with actual URL
+            self.our_active_links.discard(url)
+            self.our_active_links.add(actual_stored_url)
+            self.link_to_file_mapping[actual_stored_url] = file_item
+            self.link_to_file_mapping.pop(url, None)
+            
+            
+        except Exception as e:
+            # Clean up tracking on failure
+            self.our_active_links.discard(url)
+            self.link_to_file_mapping.pop(url, None)
+            # Remove from pending sets so it can be retried later if needed
+            self.pending_sanitized_names.discard(sanitized_name)
             file_unique_id = file_item['file_info'].get('file_unique_id')
             if file_unique_id:
-                self.pending_file_ids.add(file_unique_id)
-            
-            self.our_active_links.add(url)
-            self.link_to_file_mapping[url] = file_item
-            
-            try:
-                COMMAND_CHANNEL_ID = int(config_dict.get('LEECH_DUMP_CHAT') or self.message.chat.id)
-                clean_name = self._generate_clean_filename(file_item['file_info'])
-                leech_cmd = f'/leech {file_item["url"]} -n {clean_name}'
-                
-                command_message = await user.send_message(chat_id=COMMAND_CHANNEL_ID, text=leech_cmd)
-                actual_stored_url = f"https://t.me/c/{str(COMMAND_CHANNEL_ID)[4:]}/{command_message.id}"
-                
-                await asyncio.sleep(2)
-                
-                # Update tracking with actual URL
-                self.our_active_links.discard(url)
-                self.our_active_links.add(actual_stored_url)
-                self.link_to_file_mapping[actual_stored_url] = file_item
-                self.link_to_file_mapping.pop(url, None)
-                break
-                
-            except Exception as e:
-                LOGGER.error(f"[cleech] Error starting download for {sanitized_name}: {e}")
-                # Clean up tracking on failure
-                self.our_active_links.discard(url)
-                self.link_to_file_mapping.pop(url, None)
-                self.pending_sanitized_names.discard(sanitized_name)
-                if file_unique_id:
-                    self.pending_file_ids.discard(file_unique_id)
-                continue
+                self.pending_file_ids.discard(file_unique_id)
 
     async def _save_progress(self, interrupted=False):
         try:
