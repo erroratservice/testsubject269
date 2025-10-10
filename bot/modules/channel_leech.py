@@ -280,31 +280,39 @@ class SimpleChannelLeechCoordinator(TaskListener):
         try:
             sanitized_name = self._generate_clean_filename(file_item['file_info'])
             file_info = file_item['file_info']
+            url = file_item['url']
+            
+            # DEBUG: Start checking
+            LOGGER.debug(f"[cleech-debug] Checking duplicates for: '{sanitized_name}'")
             
             # Check our internal queue tracking
             if sanitized_name in self.pending_sanitized_names:
+                LOGGER.debug(f"[cleech-debug] ⊗ SKIPPED (in pending_sanitized_names)")
                 return True
             
             file_unique_id = file_info.get('file_unique_id')
             if file_unique_id and file_unique_id in self.pending_file_ids:
+                LOGGER.debug(f"[cleech-debug] ⊗ SKIPPED (in pending_file_ids)")
                 return True
             
             # Check bot's active download queue
-            url = file_item['url']
             if url in self.our_active_links:
+                LOGGER.debug(f"[cleech-debug] ⊗ SKIPPED (in our_active_links)")
                 return True
             
             # Check global bot task queue
             if await self._check_bot_task_queue(sanitized_name, url):
+                LOGGER.debug(f"[cleech-debug] ⊗ SKIPPED (in bot task queue)")
                 return True
             
             # Check if file already exists (includes both completed AND failed files)
-            if await database.check_file_exists(file_info=file_info):
-                # OPTIONAL: Check if failed file should be retried
-                # if not await database.should_retry_failed_file(file_info):
-                #     return True
+            db_exists = await database.check_file_exists(file_info=file_info)
+            if db_exists:
+                LOGGER.debug(f"[cleech-debug] ⊗ SKIPPED (found in database)")
                 return True
             
+            # DEBUG: File passed all checks
+            LOGGER.debug(f"[cleech-debug] ✓ PASSED all duplicate checks - will download")
             return False
             
         except Exception as e:
@@ -1127,6 +1135,9 @@ class SimpleChannelLeechCoordinator(TaskListener):
     async def _process_batch_with_skip_tracking(self, message_batch, scanner, processed_so_far):
         skip_counts = {'filter': 0, 'existing': 0, 'queued': 0}
         
+        # DEBUG: Log batch start
+        LOGGER.debug(f"[cleech-debug] Processing batch of {len(message_batch)} messages")
+        
         for message in message_batch:
             if self.is_cancelled:
                 break
@@ -1136,8 +1147,12 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 if not file_info:
                     continue
                 
+                filename = file_info.get('file_name', 'unknown')
+                LOGGER.debug(f"[cleech-debug] Batch checking msg_id={message.id}, file='{filename}'")
+                
                 # Check filter match
                 if not self._check_filter_match(file_info['search_text']):
+                    LOGGER.debug(f"[cleech-debug] ⊗ Filter mismatch: '{filename}'")
                     skip_counts['filter'] += 1
                     continue
 
@@ -1147,18 +1162,23 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 
                 # Check database for existing files
                 if await database.check_file_exists(file_info=file_info):
+                    LOGGER.debug(f"[cleech-debug] ⊗ Already exists in DB: '{sanitized_name}'")
                     skip_counts['existing'] += 1
                     continue
                     
                 # Check processing queue
                 if sanitized_name in self.pending_sanitized_names:
+                    LOGGER.debug(f"[cleech-debug] ⊗ Already in queue (by name): '{sanitized_name}'")
                     skip_counts['queued'] += 1
                     continue
                     
                 if file_unique_id and file_unique_id in self.pending_file_ids:
+                    LOGGER.debug(f"[cleech-debug] ⊗ Already in queue (by ID): '{sanitized_name}'")
                     skip_counts['queued'] += 1
                     continue
-                    
+                
+                # File passed all checks - add to queue
+                LOGGER.debug(f"[cleech-debug] ✓ Adding to queue: '{sanitized_name}'")
                 message_link = f"https://t.me/c/{str(self.channel_chat_id)[4:]}/{message.id}"
                 self.pending_files.append({
                     'url': message_link,
@@ -1175,6 +1195,9 @@ class SimpleChannelLeechCoordinator(TaskListener):
             except Exception as e:
                 LOGGER.error(f"[cleech] Error processing message {message.id}: {e}")
 
+        # DEBUG: Log batch summary
+        LOGGER.debug(f"[cleech-debug] Batch complete: filter={skip_counts['filter']}, existing={skip_counts['existing']}, queued={skip_counts['queued']}, added={len(self.pending_files)}")
+        
         # Start downloads
         while len(self.our_active_links) < self.max_concurrent and self.pending_files:
             await self._start_next_download()
