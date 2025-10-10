@@ -337,36 +337,26 @@ class DbManager:
             if file_info:
                 base_name = get_duplicate_check_name(file_info)
                 
-                # DEBUG: Log what we're checking (INFO level so it shows up)
-                LOGGER.info(f"[CLEECH-DEBUG] check_file_exists: base_name='{base_name}'")
-                
                 for ext in COMMON_EXTENSIONS:
                     for field in ("caption_first_line", "file_name"):
                         value = base_name + ext
                         query = {field: {"$regex": f"^{re.escape(value)}$", "$options": "i"}}
                         result = await self._db.file_catalog.find_one(query)
                         if result:
-                            # DEBUG: Log WHY it matched
-                            LOGGER.info(f"[CLEECH-DEBUG] ✓ FOUND in DB: field='{field}', value='{value}', status='{result.get('status', 'unknown')}'")
                             return True
-                
-                # DEBUG: Log if NOT found
-                LOGGER.info(f"[CLEECH-DEBUG] ✗ NOT in DB: base_name='{base_name}'")
             
             if file_unique_id:
                 result = await self._db.file_catalog.find_one({"file_unique_id": file_unique_id})
                 if result:
-                    LOGGER.info(f"[CLEECH-DEBUG] ✓ FOUND by file_unique_id: {file_unique_id}")
                     return True
             
             if file_hash:
                 result = await self._db.file_catalog.find_one({"file_hash": file_hash})
                 if result:
-                    LOGGER.info(f"[CLEECH-DEBUG] ✓ FOUND by file_hash: {file_hash}")
                     return True
             
             return False
-            
+        
         except PyMongoError as e:
             LOGGER.error(f"Error checking file exists: {e}")
             return False
@@ -528,22 +518,27 @@ class DbManager:
     async def get_catalog_files_with_stats(self, channel_id, filter_tags=None, filter_mode='and', scan_type=None, from_msg_id=None, to_msg_id=None):
         """Get files from catalog with enhanced filtering and detailed statistics tracking"""
         try:
+            # Initialize detailed statistics tracking
             stats = {
                 'total_processed': 0,
                 'filter_rejected': 0,
                 'already_downloaded': 0,
                 'type_filtered': 0,
-                'range_filtered': 0
+                'range_filtered': 0,
+                'duplicate_rejected': 0  # NEW: Track queue duplicates separately
             }
             
+            # Build optimized MongoDB aggregation pipeline
             pipeline = []
             base_match_stage = {"channel_id": channel_id}
             pipeline.append({"$match": base_match_stage})
             
+            # Count total files before any filtering
             total_cursor = self._db.channel_catalog.aggregate([{"$match": base_match_stage}, {"$count": "total"}])
             total_result = await total_cursor.to_list(1)
             total_in_channel = total_result[0]['total'] if total_result else 0
             
+            # Stage 2: Apply message range filters
             if from_msg_id or to_msg_id:
                 msg_range = {}
                 if from_msg_id:
@@ -553,11 +548,13 @@ class DbManager:
                 range_filter_stage = {"message_id": msg_range}
                 pipeline.append({"$match": range_filter_stage})
                 
+                # Count range filtered
                 range_cursor = self._db.channel_catalog.aggregate(pipeline + [{"$count": "total"}])
                 range_result = await range_cursor.to_list(1)
                 after_range = range_result[0]['total'] if range_result else 0
                 stats['range_filtered'] = total_in_channel - after_range
             
+            # Stage 3: Apply scan type filter
             if scan_type == 'document':
                 type_filter = {"file_info.mime_type": {"$regex": "^(application/|text/)"}}
                 pipeline.append({"$match": type_filter})
@@ -565,6 +562,7 @@ class DbManager:
                 type_filter = {"file_info.mime_type": {"$regex": "^video/"}}
                 pipeline.append({"$match": type_filter})
             
+            # Count after type filtering
             if scan_type:
                 type_cursor = self._db.channel_catalog.aggregate(pipeline + [{"$count": "total"}])
                 type_result = await type_cursor.to_list(1)
@@ -572,11 +570,13 @@ class DbManager:
                 before_type = total_in_channel - stats['range_filtered']
                 stats['type_filtered'] = before_type - after_type
             
+            # Count files before text filtering
             before_text_cursor = self._db.channel_catalog.aggregate(pipeline + [{"$count": "total"}])
             before_text_result = await before_text_cursor.to_list(1)
             before_text_filtering = before_text_result[0]['total'] if before_text_result else 0
             stats['total_processed'] = before_text_filtering
             
+            # Stage 4: Apply filter tags
             if filter_tags:
                 if filter_mode == 'or':
                     or_conditions = []
@@ -587,12 +587,14 @@ class DbManager:
                     for tag in filter_tags:
                         pipeline.append({"$match": {"file_info.search_text": {"$regex": re.escape(tag), "$options": "i"}}})
             
+            # Count after text filtering
             if filter_tags:
                 after_text_cursor = self._db.channel_catalog.aggregate(pipeline + [{"$count": "total"}])
                 after_text_result = await after_text_cursor.to_list(1)
                 after_text_filtering = after_text_result[0]['total'] if after_text_result else 0
                 stats['filter_rejected'] = before_text_filtering - after_text_filtering
             
+            # Stage 5: Sort and project
             pipeline.append({"$sort": {"message_id": -1}})
             pipeline.append({
                 "$project": {
@@ -602,6 +604,7 @@ class DbManager:
                 }
             })
             
+            # Execute aggregation
             aggregation_options = {
                 "allowDiskUse": True,
                 "maxTimeMS": 300000,
@@ -613,10 +616,12 @@ class DbManager:
             matched_files = []
             already_downloaded = 0
             
+            # Process results with detailed tracking
             async for entry in cursor:
                 file_info = entry['file_info']
                 sanitized_name = file_info.get('sanitized_name', file_info.get('file_name', ''))
                 
+                # Check if file already exists (downloaded or failed)
                 if not await self.check_file_exists(file_info=file_info):
                     matched_files.append({
                         'message_id': entry['message_id'],
@@ -627,12 +632,15 @@ class DbManager:
                 else:
                     already_downloaded += 1
             
+            # Update final statistics
             stats['already_downloaded'] = already_downloaded
+            
             return matched_files, stats
             
         except Exception as e:
             LOGGER.error(f"Error in optimized catalog query with stats: {e}")
-            return [], {'total_processed': 0, 'filter_rejected': 0, 'already_downloaded': 0, 'type_filtered': 0, 'range_filtered': 0}
+            return [], {'total_processed': 0, 'filter_rejected': 0, 'already_downloaded': 0, 'type_filtered': 0, 'range_filtered': 0, 'duplicate_rejected': 0}
+
 
     async def get_catalog_files(self, channel_id, filter_tags=None, filter_mode='and', scan_type=None, from_msg_id=None, to_msg_id=None):
         """Get files from catalog with enhanced filtering"""
