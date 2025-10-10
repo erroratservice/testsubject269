@@ -554,7 +554,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
             cataloged_count = 0
             latest_msg_id = 0
             oldest_msg_id = float('inf')
-
+            
             if self.resume_mode:
                 await self._restore_resume_state(scanner)
                 while len(self.our_active_links) < self.max_concurrent and self.pending_files:
@@ -680,7 +680,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
                         file_info
                     )
                     cataloged_count += 1
-
+                
                 if completion_task is None and (self.our_active_links or self.pending_files):
                     completion_task = asyncio.create_task(self._wait_for_completion_callback_mode())
 
@@ -784,30 +784,12 @@ class SimpleChannelLeechCoordinator(TaskListener):
                     await completion_task
                 except asyncio.CancelledError:
                     pass
-
-            # Show scan completion status
-            scan_type_text = f"{self.scan_type.title()}s" if self.scan_type else "All media"
-            total_pending = len(self.our_active_links) + len(self.pending_files)
             
-            if total_pending > 0:
-                await self._safe_edit_message(self.status_message, 
-                    f"**✅ {scan_type_text} scan completed! ({scanned_media_count}/{total_media_files})**\n"
-                    f"**Catalog:** Built with {cataloged_count} files (future scans will be instant!)\n\n"
-                    f"**📥 Downloads queued: {total_pending} files**\n"
-                    f"**Active:** {len(self.our_active_links)}/{self.max_concurrent} | **Pending:** {len(self.pending_files)}\n"
-                    f"**Completed:** {self.completed_count} | **Failed:** {self.failed_count}\n\n"
-                    f"**⏳ Waiting for queued processes to complete...**"
-                )
-            else:
-                await self._safe_edit_message(self.status_message, 
-                    f"**✅ {scan_type_text} scan completed! ({scanned_media_count}/{total_media_files})**\n"
-                    f"**Catalog:** Built with {cataloged_count} files (future scans will be instant!)\n\n"
-                    f"**📥 No downloads needed** - all files already exist or filtered out\n"
-                    f"**Final Results:** {self.completed_count} completed | {self.failed_count} failed"
-                )
-                return
-
-            # Wait for completion silently
+            # REMOVED: No intermediate "scan completed" message here
+            # This prevents the annoying switching between scan status and download status
+            # _wait_for_completion_callback_mode() will show download progress immediately
+            
+            # Wait for completion with download progress updates
             await self._wait_for_completion_callback_mode()
             await self._show_final_results(processed_messages, 0)
             
