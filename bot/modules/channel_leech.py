@@ -1206,27 +1206,21 @@ class SimpleChannelLeechCoordinator(TaskListener):
         return skip_counts
 
     async def _start_next_download(self):
-        """Enhanced download starter with comprehensive duplicate checking"""
+        """Enhanced download starter - skip duplicate checking since files are pre-filtered"""
         if not self.pending_files or len(self.our_active_links) >= self.max_concurrent:
             return
         
-        # Find next non-duplicate file
-        while self.pending_files:
+        # Files are already pre-filtered in _process_from_catalog() and _process_batch_with_skip_tracking()
+        # No need to check _is_download_duplicate() again - just pop and send
+        if self.pending_files:
             file_item = self.pending_files.pop(0)
-            
-            # Comprehensive duplicate check
-            if await self._is_download_duplicate(file_item):
-                continue
             
             # Add to tracking before starting
             sanitized_name = self._generate_clean_filename(file_item['file_info'])
             url = file_item['url']
             
-            self.pending_sanitized_names.add(sanitized_name)
-            file_unique_id = file_item['file_info'].get('file_unique_id')
-            if file_unique_id:
-                self.pending_file_ids.add(file_unique_id)
-            
+            # Files are already in pending sets from when they were added to queue
+            # Just update our active links
             self.our_active_links.add(url)
             self.link_to_file_mapping[url] = file_item
             
@@ -1235,6 +1229,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 clean_name = self._generate_clean_filename(file_item['file_info'])
                 leech_cmd = f'/leech {file_item["url"]} -n {clean_name}'
                 
+                LOGGER.info(f"[CLEECH-DEBUG] ✓ SENDING LEECH COMMAND: '{clean_name}'")
                 command_message = await user.send_message(chat_id=COMMAND_CHANNEL_ID, text=leech_cmd)
                 actual_stored_url = f"https://t.me/c/{str(COMMAND_CHANNEL_ID)[4:]}/{command_message.id}"
                 
@@ -1245,17 +1240,19 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 self.our_active_links.add(actual_stored_url)
                 self.link_to_file_mapping[actual_stored_url] = file_item
                 self.link_to_file_mapping.pop(url, None)
-                break
+                
+                LOGGER.info(f"[CLEECH-DEBUG] ✓ COMMAND SENT SUCCESSFULLY: '{clean_name}'")
                 
             except Exception as e:
                 LOGGER.error(f"[cleech] Error starting download for {sanitized_name}: {e}")
                 # Clean up tracking on failure
                 self.our_active_links.discard(url)
                 self.link_to_file_mapping.pop(url, None)
+                # Remove from tracking sets on failure
                 self.pending_sanitized_names.discard(sanitized_name)
+                file_unique_id = file_item['file_info'].get('file_unique_id')
                 if file_unique_id:
                     self.pending_file_ids.discard(file_unique_id)
-                continue
 
     async def _save_progress(self, interrupted=False):
         try:
