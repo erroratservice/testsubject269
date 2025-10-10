@@ -1364,7 +1364,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
 
 @new_task
 async def channel_leech(client, message):
-    SimpleChannelLeechCoordinator._task_listens()
     coordinator = SimpleChannelLeechCoordinator(client, message)
     await coordinator.new_event()
 
