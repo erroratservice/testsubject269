@@ -337,26 +337,36 @@ class DbManager:
             if file_info:
                 base_name = get_duplicate_check_name(file_info)
                 
+                # DEBUG: Log what we're checking
+                LOGGER.debug(f"[cleech-debug] Checking file existence: base_name='{base_name}'")
+                
                 for ext in COMMON_EXTENSIONS:
                     for field in ("caption_first_line", "file_name"):
                         value = base_name + ext
                         query = {field: {"$regex": f"^{re.escape(value)}$", "$options": "i"}}
                         result = await self._db.file_catalog.find_one(query)
                         if result:
+                            # DEBUG: Log WHY it matched
+                            LOGGER.debug(f"[cleech-debug] ✓ FOUND in file_catalog: field='{field}', value='{value}', status='{result.get('status', 'unknown')}'")
                             return True
+                
+                # DEBUG: Log if NOT found in catalog
+                LOGGER.debug(f"[cleech-debug] ✗ NOT in file_catalog: base_name='{base_name}'")
             
             if file_unique_id:
                 result = await self._db.file_catalog.find_one({"file_unique_id": file_unique_id})
                 if result:
+                    LOGGER.debug(f"[cleech-debug] ✓ FOUND by file_unique_id: {file_unique_id}")
                     return True
             
             if file_hash:
                 result = await self._db.file_catalog.find_one({"file_hash": file_hash})
                 if result:
+                    LOGGER.debug(f"[cleech-debug] ✓ FOUND by file_hash: {file_hash}")
                     return True
             
             return False
-        
+            
         except PyMongoError as e:
             LOGGER.error(f"Error checking file exists: {e}")
             return False
