@@ -280,39 +280,31 @@ class SimpleChannelLeechCoordinator(TaskListener):
         try:
             sanitized_name = self._generate_clean_filename(file_item['file_info'])
             file_info = file_item['file_info']
-            url = file_item['url']
-            
-            # DEBUG: Start checking (INFO level)
-            LOGGER.info(f"[CLEECH-DEBUG] Checking duplicate: '{sanitized_name}'")
             
             # Check our internal queue tracking
             if sanitized_name in self.pending_sanitized_names:
-                LOGGER.info(f"[CLEECH-DEBUG] ⊗ SKIP: in pending_sanitized_names")
                 return True
             
             file_unique_id = file_info.get('file_unique_id')
             if file_unique_id and file_unique_id in self.pending_file_ids:
-                LOGGER.info(f"[CLEECH-DEBUG] ⊗ SKIP: in pending_file_ids")
                 return True
             
             # Check bot's active download queue
+            url = file_item['url']
             if url in self.our_active_links:
-                LOGGER.info(f"[CLEECH-DEBUG] ⊗ SKIP: in our_active_links")
                 return True
             
             # Check global bot task queue
             if await self._check_bot_task_queue(sanitized_name, url):
-                LOGGER.info(f"[CLEECH-DEBUG] ⊗ SKIP: in bot task queue")
                 return True
             
             # Check if file already exists (includes both completed AND failed files)
-            db_exists = await database.check_file_exists(file_info=file_info)
-            if db_exists:
-                LOGGER.info(f"[CLEECH-DEBUG] ⊗ SKIP: found in database")
+            if await database.check_file_exists(file_info=file_info):
+                # OPTIONAL: Check if failed file should be retried
+                # if not await database.should_retry_failed_file(file_info):
+                #     return True
                 return True
             
-            # DEBUG: File passed all checks
-            LOGGER.info(f"[CLEECH-DEBUG] ✓ PASS: will download '{sanitized_name}'")
             return False
             
         except Exception as e:
@@ -392,21 +384,27 @@ class SimpleChannelLeechCoordinator(TaskListener):
                     duplicate_count += 1
             
             self.pending_files = filtered_files
-            already_downloaded += duplicate_count
-            total_found = len(self.pending_files)
             
-            if duplicate_count > 0:
-                LOGGER.info(f"[cleech] Filtered out {duplicate_count} duplicates from queue")
+            # Update statistics with separate duplicate tracking
+            catalog_statistics['duplicate_rejected'] = duplicate_count
+            total_found = len(self.pending_files)
             
             if total_found == 0:
                 scan_type_text = f" {self.scan_type}" if self.scan_type else ""
+                # Extract detailed statistics for display
+                filter_rejected = catalog_statistics.get('filter_rejected', 0)
+                already_downloaded = catalog_statistics.get('already_downloaded', 0)
+                duplicate_rejected = catalog_statistics.get('duplicate_rejected', 0)
+                
                 await self._safe_edit_message(self.status_message, 
                     f"**✅ Catalog processed! No matching files found for download**\n\n"
-                    f"**📊 Catalog Statistics:**\n"
+                    f"**📊 Detailed Statistics:**\n"
                     f"**Total{scan_type_text} files processed:** {total_processed:,}\n"
-                    f"**Filter match rate:** {filter_match_rate:.1f}%\n"
-                    f"**Already downloaded/queued:** {already_downloaded:,}\n"
+                    f"**Filter rejections:** {filter_rejected:,}\n"
+                    f"**Already downloaded:** {already_downloaded:,}\n"
+                    f"**Queue duplicates:** {duplicate_rejected:,}\n"
                     f"**Available for download:** {total_found} files\n\n"
+                    f"**📈 Filter match rate:** {filter_match_rate:.1f}%\n\n"
                     f"**Filter:** {self._get_filter_description()}\n"
                     f"**Range:** {self._get_range_description()}"
                 )
@@ -429,13 +427,20 @@ class SimpleChannelLeechCoordinator(TaskListener):
             total_pending = len(self.our_active_links) + len(self.pending_files)
             scan_type_text = f" {self.scan_type}" if self.scan_type else ""
             
+            # Extract detailed statistics for display
+            filter_rejected = catalog_statistics.get('filter_rejected', 0)
+            already_downloaded = catalog_statistics.get('already_downloaded', 0)
+            duplicate_rejected = catalog_statistics.get('duplicate_rejected', 0)
+            
             await self._safe_edit_message(self.status_message, 
                 f"**✅ Catalog processed! Found {total_found:,} files for download**\n\n"
-                f"**📊 Catalog Statistics:**\n"
+                f"**📊 Detailed Statistics:**\n"
                 f"**Total{scan_type_text} files processed:** {total_processed:,}\n"
-                f"**Filter match rate:** {filter_match_rate:.1f}%\n"
-                f"**Already downloaded/queued:** {already_downloaded:,}\n"
+                f"**Filter rejections:** {filter_rejected:,}\n"
+                f"**Already downloaded:** {already_downloaded:,}\n"
+                f"**Queue duplicates:** {duplicate_rejected:,}\n"
                 f"**Available for download:** {total_found:,} files\n\n"
+                f"**📈 Filter match rate:** {filter_match_rate:.1f}%\n\n"
                 f"**Filter:** {self._get_filter_description()}\n"
                 f"**Range:** {self._get_range_description()}\n\n"
                 f"**📥 Downloads queued: {total_pending} files**\n"
@@ -1135,9 +1140,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
     async def _process_batch_with_skip_tracking(self, message_batch, scanner, processed_so_far):
         skip_counts = {'filter': 0, 'existing': 0, 'queued': 0}
         
-        # DEBUG: Log batch start (INFO level)
-        LOGGER.info(f"[CLEECH-DEBUG] === BATCH START: {len(message_batch)} messages ===")
-        
         for message in message_batch:
             if self.is_cancelled:
                 break
@@ -1147,12 +1149,8 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 if not file_info:
                     continue
                 
-                filename = file_info.get('file_name', 'unknown')
-                LOGGER.info(f"[CLEECH-DEBUG] Processing msg_id={message.id}, file='{filename}'")
-                
                 # Check filter match
                 if not self._check_filter_match(file_info['search_text']):
-                    LOGGER.info(f"[CLEECH-DEBUG] ⊗ Filter reject: '{filename}'")
                     skip_counts['filter'] += 1
                     continue
 
@@ -1161,25 +1159,19 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 file_unique_id = file_info.get('file_unique_id')
                 
                 # Check database for existing files
-                LOGGER.info(f"[CLEECH-DEBUG] About to call check_file_exists for: '{sanitized_name}'")
                 if await database.check_file_exists(file_info=file_info):
-                    LOGGER.info(f"[CLEECH-DEBUG] ⊗ DB reject: '{sanitized_name}'")
                     skip_counts['existing'] += 1
                     continue
                     
                 # Check processing queue
                 if sanitized_name in self.pending_sanitized_names:
-                    LOGGER.info(f"[CLEECH-DEBUG] ⊗ Queue reject (name): '{sanitized_name}'")
                     skip_counts['queued'] += 1
                     continue
                     
                 if file_unique_id and file_unique_id in self.pending_file_ids:
-                    LOGGER.info(f"[CLEECH-DEBUG] ⊗ Queue reject (ID): '{sanitized_name}'")
                     skip_counts['queued'] += 1
                     continue
-                
-                # File passed all checks - add to queue
-                LOGGER.info(f"[CLEECH-DEBUG] ✓ ADDING to queue: '{sanitized_name}'")
+                    
                 message_link = f"https://t.me/c/{str(self.channel_chat_id)[4:]}/{message.id}"
                 self.pending_files.append({
                     'url': message_link,
@@ -1196,9 +1188,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
             except Exception as e:
                 LOGGER.error(f"[cleech] Error processing message {message.id}: {e}")
 
-        # DEBUG: Log batch summary
-        LOGGER.info(f"[CLEECH-DEBUG] === BATCH END: filter={skip_counts['filter']}, existing={skip_counts['existing']}, queued={skip_counts['queued']} ===")
-        
         # Start downloads
         while len(self.our_active_links) < self.max_concurrent and self.pending_files:
             await self._start_next_download()
@@ -1206,21 +1195,27 @@ class SimpleChannelLeechCoordinator(TaskListener):
         return skip_counts
 
     async def _start_next_download(self):
-        """Enhanced download starter - skip duplicate checking since files are pre-filtered"""
+        """Enhanced download starter with comprehensive duplicate checking"""
         if not self.pending_files or len(self.our_active_links) >= self.max_concurrent:
             return
         
-        # Files are already pre-filtered in _process_from_catalog() and _process_batch_with_skip_tracking()
-        # No need to check _is_download_duplicate() again - just pop and send
-        if self.pending_files:
+        # Find next non-duplicate file
+        while self.pending_files:
             file_item = self.pending_files.pop(0)
+            
+            # Comprehensive duplicate check
+            if await self._is_download_duplicate(file_item):
+                continue
             
             # Add to tracking before starting
             sanitized_name = self._generate_clean_filename(file_item['file_info'])
             url = file_item['url']
             
-            # Files are already in pending sets from when they were added to queue
-            # Just update our active links
+            self.pending_sanitized_names.add(sanitized_name)
+            file_unique_id = file_item['file_info'].get('file_unique_id')
+            if file_unique_id:
+                self.pending_file_ids.add(file_unique_id)
+            
             self.our_active_links.add(url)
             self.link_to_file_mapping[url] = file_item
             
@@ -1229,7 +1224,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 clean_name = self._generate_clean_filename(file_item['file_info'])
                 leech_cmd = f'/leech {file_item["url"]} -n {clean_name}'
                 
-                LOGGER.info(f"[CLEECH-DEBUG] ✓ SENDING LEECH COMMAND: '{clean_name}'")
                 command_message = await user.send_message(chat_id=COMMAND_CHANNEL_ID, text=leech_cmd)
                 actual_stored_url = f"https://t.me/c/{str(COMMAND_CHANNEL_ID)[4:]}/{command_message.id}"
                 
@@ -1240,19 +1234,17 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 self.our_active_links.add(actual_stored_url)
                 self.link_to_file_mapping[actual_stored_url] = file_item
                 self.link_to_file_mapping.pop(url, None)
-                
-                LOGGER.info(f"[CLEECH-DEBUG] ✓ COMMAND SENT SUCCESSFULLY: '{clean_name}'")
+                break
                 
             except Exception as e:
                 LOGGER.error(f"[cleech] Error starting download for {sanitized_name}: {e}")
                 # Clean up tracking on failure
                 self.our_active_links.discard(url)
                 self.link_to_file_mapping.pop(url, None)
-                # Remove from tracking sets on failure
                 self.pending_sanitized_names.discard(sanitized_name)
-                file_unique_id = file_item['file_info'].get('file_unique_id')
                 if file_unique_id:
                     self.pending_file_ids.discard(file_unique_id)
+                continue
 
     async def _save_progress(self, interrupted=False):
         try:
