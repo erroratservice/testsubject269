@@ -423,32 +423,11 @@ class SimpleChannelLeechCoordinator(TaskListener):
             while len(self.our_active_links) < self.max_concurrent and self.pending_files:
                 await self._start_next_download()
             
-            # Show completion status with statistics
-            total_pending = len(self.our_active_links) + len(self.pending_files)
-            scan_type_text = f" {self.scan_type}" if self.scan_type else ""
+            # REMOVED: No intermediate "Catalog processed! Found X files" message here
+            # This prevents the annoying switching between catalog status and download status
+            # _wait_for_completion_callback_mode() will show download progress immediately
             
-            # Extract detailed statistics for display
-            filter_rejected = catalog_statistics.get('filter_rejected', 0)
-            already_downloaded = catalog_statistics.get('already_downloaded', 0)
-            duplicate_rejected = catalog_statistics.get('duplicate_rejected', 0)
-            
-            await self._safe_edit_message(self.status_message, 
-                f"**✅ Catalog processed! Found {total_found:,} files for download**\n\n"
-                f"**📊 Detailed Statistics:**\n"
-                f"**Total{scan_type_text} files processed:** {total_processed:,}\n"
-                f"**Filter rejections:** {filter_rejected:,}\n"
-                f"**Already downloaded:** {already_downloaded:,}\n"
-                f"**Queue duplicates:** {duplicate_rejected:,}\n"
-                f"**Available for download:** {total_found:,} files\n\n"
-                f"**📈 Filter match rate:** {filter_match_rate:.1f}%\n\n"
-                f"**Filter:** {self._get_filter_description()}\n"
-                f"**Range:** {self._get_range_description()}\n\n"
-                f"**📥 Downloads queued: {total_pending} files**\n"
-                f"**Active:** {len(self.our_active_links)}/{self.max_concurrent} | **Pending:** {len(self.pending_files)}\n"
-                f"**⏳ Waiting for queued processes to complete...**"
-            )
-            
-            # Wait for completion silently
+            # Wait for completion with download progress updates
             await self._wait_for_completion_callback_mode()
             await self._show_final_results(total_processed, filter_rejected)
             
