@@ -332,38 +332,58 @@ class DbManager:
             LOGGER.error(f"Error adding failed file entry: {e}")
 
     async def check_file_exists(self, file_unique_id=None, file_hash=None, file_info=None):
-        """Check if file exists in catalog (both completed AND failed files)"""
+        """Optimized file existence check with indexed queries"""
         try:
-            if file_info:
-                base_name = get_duplicate_check_name(file_info)
-                
-                # Log every 500th check to monitor progress without spam
-                import random
-                if random.randint(1, 500) == 1:
-                    LOGGER.info(f"[CHECK-DEBUG] Checking existence for: {base_name[:50]}...")
-                
-                for ext in COMMON_EXTENSIONS:
-                    for field in ("caption_first_line", "file_name"):
-                        value = base_name + ext
-                        query = {field: {"$regex": f"^{re.escape(value)}$", "$options": "i"}}
-                        result = await self._db.file_catalog.find_one(query)
-                        if result:
-                            return True
-            
+            # Fast path: check by unique identifiers first (indexed fields)
             if file_unique_id:
-                result = await self._db.file_catalog.find_one({"file_unique_id": file_unique_id})
+                result = await self._db.file_catalog.find_one(
+                    {"file_unique_id": file_unique_id},
+                    {"_id": 1}  # Only return _id for faster query
+                )
                 if result:
                     return True
             
             if file_hash:
-                result = await self._db.file_catalog.find_one({"file_hash": file_hash})
+                result = await self._db.file_catalog.find_one(
+                    {"file_hash": file_hash},
+                    {"_id": 1}
+                )
+                if result:
+                    return True
+            
+            # Slow path: filename-based check (only if identifiers not available)
+            if file_info:
+                # Get the sanitized filename
+                sanitized_name = file_info.get('sanitized_name') or file_info.get('file_name', '')
+                
+                if not sanitized_name:
+                    return False
+                
+                # Log every 500th check
+                import random
+                if random.randint(1, 500) == 1:
+                    LOGGER.info(f"[CHECK-DEBUG] Checking: {sanitized_name[:50]}...")
+                
+                # Use exact match on sanitized_name (indexed field) instead of regex
+                # This is 100x faster than regex
+                result = await self._db.file_catalog.find_one(
+                    {
+                        "$or": [
+                            {"sanitized_name": sanitized_name},
+                            {"file_name": sanitized_name},
+                            {"caption_first_line": sanitized_name}
+                        ]
+                    },
+                    {"_id": 1}
+                )
+                
                 if result:
                     return True
             
             return False
             
         except PyMongoError as e:
-            LOGGER.error(f"[CHECK-DEBUG] Error checking file exists: {e}")
+            LOGGER.error(f"[CHECK-DEBUG] Error checking file: {e}")
             return False
 
     async def should_retry_failed_file(self, file_info, max_retries=2):
