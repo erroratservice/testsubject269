@@ -525,7 +525,7 @@ class DbManager:
                 'already_downloaded': 0,
                 'type_filtered': 0,
                 'range_filtered': 0,
-                'duplicate_rejected': 0  # NEW: Track queue duplicates separately
+                'duplicate_rejected': 0
             }
             
             # Build optimized MongoDB aggregation pipeline
@@ -604,33 +604,36 @@ class DbManager:
                 }
             })
             
-            # Execute aggregation
-            aggregation_options = {
-                "allowDiskUse": True,
-                "maxTimeMS": 300000,
-                "cursor": {"batchSize": 1000}
-            }
-            
-            cursor = self._db.channel_catalog.aggregate(pipeline, **aggregation_options)
+            # Execute aggregation with extended timeout and error recovery
+            cursor = self._db.channel_catalog.aggregate(
+                pipeline,
+                allowDiskUse=True,
+                maxTimeMS=600000,  # Increased to 10 minutes (was 5 minutes)
+                batchSize=500  # Smaller batches for faster processing (was 1000)
+            )
             
             matched_files = []
             already_downloaded = 0
             
-            # Process results with detailed tracking
-            async for entry in cursor:
-                file_info = entry['file_info']
-                sanitized_name = file_info.get('sanitized_name', file_info.get('file_name', ''))
-                
-                # Check if file already exists (downloaded or failed)
-                if not await self.check_file_exists(file_info=file_info):
-                    matched_files.append({
-                        'message_id': entry['message_id'],
-                        'url': f"https://t.me/c/{str(channel_id)[4:]}/{entry['message_id']}",
-                        'filename': sanitized_name,
-                        'file_info': file_info
-                    })
-                else:
-                    already_downloaded += 1
+            # Process results with cursor timeout recovery
+            try:
+                async for entry in cursor:
+                    file_info = entry['file_info']
+                    sanitized_name = file_info.get('sanitized_name', file_info.get('file_name', ''))
+                    
+                    # Check if file already exists (downloaded or failed)
+                    if not await self.check_file_exists(file_info=file_info):
+                        matched_files.append({
+                            'message_id': entry['message_id'],
+                            'url': f"https://t.me/c/{str(channel_id)[4:]}/{entry['message_id']}",
+                            'filename': sanitized_name,
+                            'file_info': file_info
+                        })
+                    else:
+                        already_downloaded += 1
+            except PyMongoError as cursor_error:
+                # If cursor expires, return partial results instead of failing completely
+                LOGGER.warning(f"Cursor timeout in catalog query, returning {len(matched_files)} files processed so far: {cursor_error}")
             
             # Update final statistics
             stats['already_downloaded'] = already_downloaded
