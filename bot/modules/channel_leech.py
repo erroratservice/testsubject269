@@ -526,7 +526,16 @@ class SimpleChannelLeechCoordinator(TaskListener):
             self.completed_scan_type = "all" if not self.scan_type else self.scan_type
             await self._save_progress()
             
-            # Wait for completion with download progress updates (NO task creation - just call it)
+
+            # Cancel completion task
+            if completion_task and not completion_task.done():
+                completion_task.cancel()
+                try:
+                    await completion_task
+                except asyncio.CancelledError:
+                    pass
+            
+            # Wait for completion with download progress updates
             await self._wait_for_completion_callback_mode()
             await self._show_final_results(processed_messages, 0)
             
