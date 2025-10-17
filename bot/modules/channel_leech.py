@@ -84,10 +84,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
         self.to_msg_id = None
         self.scan_direction = 'newest_to_oldest'
         
-        # Catalog system support
-        self.use_catalog = True
-        self.catalog_mode = None
-        
         # Unique coordinator ID for memory management
         SimpleChannelLeechCoordinator._coordinator_counter += 1
         self._coordinator_id = f"{message.from_user.id}_{self.channel_id}_{SimpleChannelLeechCoordinator._coordinator_counter}"
@@ -247,34 +243,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 return self.from_msg_id
             return self.resume_from_msg_id if self.resume_from_msg_id > 0 else 0
 
-    async def _determine_catalog_mode(self):
-        """Determine the best scanning strategy with interruption handling"""
-        try:
-            metadata = await database.get_channel_metadata(self.channel_chat_id)
-            catalog_stats = await database.get_catalog_stats(self.channel_chat_id)
-            
-            if not metadata or not catalog_stats:
-                return 'full'
-            
-            # Check if previous catalog build was interrupted
-            catalog_status = metadata.get('catalog_status', 'incomplete')
-            if catalog_status == 'incomplete':
-                LOGGER.info(f"[cleech] Previous catalog build interrupted, resuming full scan for {self.channel_id}")
-                return 'full'
-            
-            # Check if catalog is recent enough
-            last_scan = datetime.fromisoformat(metadata['last_full_scan'].replace('Z', '+00:00'))
-            time_diff = (datetime.now(timezone.utc) - last_scan.replace(tzinfo=timezone.utc)).total_seconds()
-            
-            if time_diff > 86400:  # 24 hours
-                return 'incremental'
-            
-            return 'filter_only'
-            
-        except Exception as e:
-            LOGGER.error(f"[cleech] Error determining catalog mode: {e}")
-            return 'full'
-
     async def _is_download_duplicate(self, file_item):
         """Enhanced duplicate checking with queue integration and failed file handling"""
         try:
@@ -335,170 +303,11 @@ class SimpleChannelLeechCoordinator(TaskListener):
             LOGGER.error(f"[cleech] Error checking bot task queue: {e}")
             return False
 
-    async def _process_from_catalog(self):
-        """Process files directly from catalog with current filters and enhanced duplicate prevention"""
+    async def _full_scan(self):
+        """Simple channel scan and download"""
         try:
             await self._safe_edit_message(self.status_message, 
-                "**🗄️ Loading files from catalog...**\n\n"
-                f"**Filter:** {self._get_filter_description()}")
-            
-            # Get catalog statistics and filtered files
-            catalog_stats = await database.get_catalog_stats(self.channel_chat_id)
-            total_catalog_files = catalog_stats.get('total_files', 0) if catalog_stats else 0
-            
-            await self._safe_edit_message(self.status_message, 
-                f"**🗄️ Processing catalog ({total_catalog_files:,} total files)...**\n\n"
-                f"**Filter:** {self._get_filter_description()}\n"
-                f"**Range:** {self._get_range_description()}")
-            
-            # Get filtered files with statistics
-            catalog_files, catalog_statistics = await database.get_catalog_files_with_stats(
-                channel_id=self.channel_chat_id,
-                filter_tags=self.filter_tags,
-                filter_mode=self.filter_mode,
-                scan_type=self.scan_type,
-                from_msg_id=self.from_msg_id,
-                to_msg_id=self.to_msg_id
-            )
-            
-            self.pending_files = catalog_files
-            total_found = len(catalog_files)
-            
-            # Extract statistics
-            total_processed = catalog_statistics.get('total_processed', 0)
-            filter_rejected = catalog_statistics.get('filter_rejected', 0)
-            already_downloaded = catalog_statistics.get('already_downloaded', 0)
-            
-            # Calculate rates
-            filter_match_rate = ((total_processed - filter_rejected) / total_processed * 100) if total_processed > 0 else 0
-            
-            # Pre-filter duplicates to prevent queue conflicts
-            original_count = len(self.pending_files)
-            filtered_files = []
-            duplicate_count = 0
-            
-            for file_item in self.pending_files:
-                if not await self._is_download_duplicate(file_item):
-                    filtered_files.append(file_item)
-                else:
-                    duplicate_count += 1
-            
-            self.pending_files = filtered_files
-            
-            # Update statistics with separate duplicate tracking
-            catalog_statistics['duplicate_rejected'] = duplicate_count
-            total_found = len(self.pending_files)
-            
-            if total_found == 0:
-                scan_type_text = f" {self.scan_type}" if self.scan_type else ""
-                # Extract detailed statistics for display
-                filter_rejected = catalog_statistics.get('filter_rejected', 0)
-                already_downloaded = catalog_statistics.get('already_downloaded', 0)
-                duplicate_rejected = catalog_statistics.get('duplicate_rejected', 0)
-                
-                await self._safe_edit_message(self.status_message, 
-                    f"**✅ Catalog processed! No matching files found for download**\n\n"
-                    f"**📊 Detailed Statistics:**\n"
-                    f"**Total{scan_type_text} files processed:** {total_processed:,}\n"
-                    f"**Filter rejections:** {filter_rejected:,}\n"
-                    f"**Already downloaded:** {already_downloaded:,}\n"
-                    f"**Queue duplicates:** {duplicate_rejected:,}\n"
-                    f"**Available for download:** {total_found} files\n\n"
-                    f"**📈 Filter match rate:** {filter_match_rate:.1f}%\n\n"
-                    f"**Filter:** {self._get_filter_description()}\n"
-                    f"**Range:** {self._get_range_description()}"
-                )
-                await self._show_final_results(total_processed, filter_rejected)
-                return
-            
-            # Track files in our sets
-            for file_item in self.pending_files:
-                sanitized_name = self._generate_clean_filename(file_item['file_info'])
-                self.pending_sanitized_names.add(sanitized_name)
-                file_unique_id = file_item['file_info'].get('file_unique_id')
-                if file_unique_id:
-                    self.pending_file_ids.add(file_unique_id)
-            
-            # Start downloads
-            while len(self.our_active_links) < self.max_concurrent and self.pending_files:
-                await self._start_next_download()
-            
-            # REMOVED: No intermediate "Catalog processed! Found X files" message here
-            # This prevents the annoying switching between catalog status and download status
-            # _wait_for_completion_callback_mode() will show download progress immediately
-            
-            # Wait for completion with download progress updates
-            await self._wait_for_completion_callback_mode()
-            await self._show_final_results(total_processed, filter_rejected)
-            
-        except Exception as e:
-            LOGGER.error(f"[cleech] Error processing from catalog: {e}", exc_info=True)
-            raise
-
-    async def _incremental_scan_and_catalog(self):
-        """Scan only new messages since last catalog update"""
-        try:
-            metadata = await database.get_channel_metadata(self.channel_chat_id)
-            last_message_id = metadata.get('latest_message_id', 0)
-            
-            await self._safe_edit_message(self.status_message, 
-                f"**📊 Incremental scan from message {last_message_id}...**")
-            
-            new_files_cataloged = 0
-            scanner = ChannelScanner(user, self.channel_id, filter_tags=self.filter_tags)
-            latest_msg_id = last_message_id
-            
-            message_iterator = user.get_chat_history(
-                chat_id=self.channel_chat_id,
-                offset_id=0
-            )
-            
-            async for message in message_iterator:
-                if message.id <= last_message_id:
-                    break
-                
-                latest_msg_id = max(latest_msg_id, message.id)
-                
-                if message.document or message.video:
-                    file_info = await scanner._extract_file_info(message)
-                    if file_info:
-                        await database.add_catalog_entry(
-                            self.channel_chat_id, 
-                            message.id, 
-                            file_info
-                        )
-                        new_files_cataloged += 1
-                
-                if new_files_cataloged % 100 == 0 and new_files_cataloged > 0:
-                    await self._safe_edit_message(self.status_message, 
-                        f"**📊 Incremental scan... Added {new_files_cataloged} new files**")
-            
-            # Update metadata
-            await database.update_channel_metadata(
-                self.channel_chat_id, 
-                latest_msg_id=latest_msg_id,
-                total_cataloged=new_files_cataloged,
-                catalog_status='complete'
-            )
-            
-            await self._safe_edit_message(self.status_message, 
-                f"**✅ Incremental scan complete! Added {new_files_cataloged} new files to catalog**")
-                
-        except Exception as e:
-            LOGGER.error(f"[cleech] Error in incremental scan: {e}")
-            raise
-
-    async def _full_scan_and_catalog(self):
-        """Full channel scan with catalog building and downloading"""
-        try:
-            await self._safe_edit_message(self.status_message, 
-                "**🚀 Starting channel scan with catalog building...**")
-            
-            # Mark catalog as incomplete
-            await database.update_channel_metadata(
-                self.channel_chat_id, 
-                catalog_status='incomplete'
-            )
+                "**🚀 Starting channel scan...**")
             
             scanner = ChannelScanner(user, self.channel_id, filter_tags=self.filter_tags)
             
@@ -528,11 +337,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
             skipped_filter_mismatch = 0
             skipped_existing_files = 0
             skipped_duplicates_in_queue = 0
-            
-            # Catalog variables
-            cataloged_count = 0
-            latest_msg_id = 0
-            oldest_msg_id = float('inf')
             
             if self.resume_mode:
                 await self._restore_resume_state(scanner)
@@ -594,10 +398,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 self.last_message_time = current_time
                 self.last_iteration_time = current_time
                 
-                # Track message IDs
-                latest_msg_id = max(latest_msg_id, message.id)
-                oldest_msg_id = min(oldest_msg_id, message.id)
-                
                 if not self._should_process_message(message):
                     continue
                 
@@ -650,16 +450,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
                     self.last_minute_check = current_time
                 self.messages_processed_this_minute += 1
                 
-                # Add to catalog
-                file_info = await scanner._extract_file_info(message)
-                if file_info:
-                    await database.add_catalog_entry(
-                        self.channel_chat_id, 
-                        message.id, 
-                        file_info
-                    )
-                    cataloged_count += 1
-                
                 if completion_task is None and (self.our_active_links or self.pending_files):
                     completion_task = asyncio.create_task(self._wait_for_completion_callback_mode())
 
@@ -676,8 +466,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
                     
                     await self._safe_edit_message(self.status_message, 
                         f"**Scanning {scan_type_text}... ({scanned_media_count}/{total_media_files} - {progress_percent:.1f}%)**\n"
-                        f"{filter_status}\n"
-                        f"**Catalog:** Building ({cataloged_count} files cataloged)\n\n"
+                        f"{filter_status}\n\n"
                         f"**Current Msg ID:** {message.id} | **Rate:** {overall_rate:.1f} files/s\n"
                         f"**Skipped:** {total_skipped}\n"
                         f"**Active:** {len(self.our_active_links)}/{self.max_concurrent} | **Pending:** {len(self.pending_files)}\n"
@@ -703,8 +492,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
                         if wait_time > 0:
                             await self._safe_edit_message(self.status_message, 
                                 f"⏳ **Rate limit protection - waiting {wait_time:.0f}s**\n\n"
-                                f"**Processed:** {scanned_media_count}/{total_media_files}\n"
-                                f"**Catalog:** {cataloged_count} files cataloged"
+                                f"**Processed:** {scanned_media_count}/{total_media_files}"
                             )
                             await asyncio.sleep(wait_time + 1)
                             api_request_count = 0
@@ -738,21 +526,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 skipped_duplicates_in_queue += batch_skip_counts['queued']
                 await self._save_progress()
             
-            # Update catalog metadata
-            try:
-                chat = await user.get_chat(self.channel_id)
-                channel_username = chat.username if hasattr(chat, 'username') and chat.username else None
-            except:
-                channel_username = None
-                
-            await database.update_channel_metadata(
-                self.channel_chat_id, 
-                latest_msg_id=latest_msg_id,
-                total_cataloged=cataloged_count,
-                channel_username=channel_username,
-                catalog_status='complete'
-            )
-            
             self.completed_scan_type = "all" if not self.scan_type else self.scan_type
             await self._save_progress()
             
@@ -763,10 +536,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
                     await completion_task
                 except asyncio.CancelledError:
                     pass
-            
-            # REMOVED: No intermediate "scan completed" message here
-            # This prevents the annoying switching between scan status and download status
-            # _wait_for_completion_callback_mode() will show download progress immediately
             
             # Wait for completion with download progress updates
             await self._wait_for_completion_callback_mode()
@@ -981,21 +750,18 @@ class SimpleChannelLeechCoordinator(TaskListener):
             self._unregister_coordinator()
 
     async def _coordinate_simple_leech(self):
-        # Catalog-based coordination
-        if self.use_catalog:
-            catalog_mode = await self._determine_catalog_mode()
-            self.catalog_mode = catalog_mode
+        """Simple scan - no catalog complexity"""
+        try:
+            await self._register_coordinator()
             
-            if catalog_mode == 'filter_only':
-                await self._process_from_catalog()
-                return
-            elif catalog_mode == 'incremental':
-                await self._incremental_scan_and_catalog()
-                await self._process_from_catalog()
-                return
-            else:
-                await self._full_scan_and_catalog()
-                return
+            # Always do a simple scan (no catalog)
+            await self._full_scan()
+            
+        except Exception as e:
+            LOGGER.error(f"[cleech] Error in coordination: {e}", exc_info=True)
+            raise
+        finally:
+            self._unregister_coordinator()
 
     async def _wait_for_completion_callback_mode(self):
         """Wait for completion using TaskListener callbacks with detailed status updates"""
@@ -1031,29 +797,17 @@ class SimpleChannelLeechCoordinator(TaskListener):
                         # Determine scan type text
                         scan_type_text = f" {self.scan_type}" if self.scan_type else ""
                         
-                        # Create enhanced status text
-                        if self.catalog_mode == 'filter_only':
-                            status_text = (
-                                f"**✅ Catalog processed! Downloads in progress...**\n\n"
-                                f"**📊 Progress: {progress_percent:.1f}% ({total_processed}/{total_started})**\n"
-                                f"**Active:** {len(self.our_active_links)}/{self.max_concurrent} | **Queued:** {len(self.pending_files)}\n"
-                                f"**Completed:** {self.completed_count} | **Failed:** {self.failed_count}\n"
-                                f"**Rate:** {downloads_per_minute:.1f} files/min{eta_text}\n\n"
-                                f"**Filter:** {self._get_filter_description()}\n"
-                                f"**Range:** {self._get_range_description()}\n\n"
-                                f"**⏳ Processing remaining {total_pending} downloads...**"
-                            )
-                        else:
-                            status_text = (
-                                f"**✅{scan_type_text.title()} scan completed! Downloads in progress...**\n\n"
-                                f"**📊 Progress: {progress_percent:.1f}% ({total_processed}/{total_started})**\n"
-                                f"**Active:** {len(self.our_active_links)}/{self.max_concurrent} | **Queued:** {len(self.pending_files)}\n"
-                                f"**Completed:** {self.completed_count} | **Failed:** {self.failed_count}\n"
-                                f"**Rate:** {downloads_per_minute:.1f} files/min{eta_text}\n\n"
-                                f"**Filter:** {self._get_filter_description()}\n"
-                                f"**Range:** {self._get_range_description()}\n\n"
-                                f"**⏳ Processing remaining {total_pending} downloads...**"
-                            )
+                        # Create status text (NO catalog_mode check!)
+                        status_text = (
+                            f"**✅{scan_type_text.title()} scan completed! Downloads in progress...**\n\n"
+                            f"**📊 Progress: {progress_percent:.1f}% ({total_processed}/{total_started})**\n"
+                            f"**Active:** {len(self.our_active_links)}/{self.max_concurrent} | **Queued:** {len(self.pending_files)}\n"
+                            f"**Completed:** {self.completed_count} | **Failed:** {self.failed_count}\n"
+                            f"**Rate:** {downloads_per_minute:.1f} files/min{eta_text}\n\n"
+                            f"**Filter:** {self._get_filter_description()}\n"
+                            f"**Range:** {self._get_range_description()}\n\n"
+                            f"**⏳ Processing remaining {total_pending} downloads...**"
+                        )
                         
                         await self._safe_edit_message(self.status_message, status_text)
                         last_status_update = current_time
@@ -1201,6 +955,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 self.pending_file_ids.discard(file_unique_id)
 
     async def _save_progress(self, interrupted=False):
+        """Save progress for resume capability"""
         try:
             progress = {
                 "user_id": self.message.from_user.id,
@@ -1208,48 +963,30 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 "filter_tags": self.filter_tags,
                 "scan_type": self.scan_type,
                 "scanned_message_ids": list(self.scanned_message_ids),
-                "pending_files": [f['message_id'] for f in self.pending_files] + [item['message_id'] for item in self.link_to_file_mapping.values()],
+                "pending_files": [f['message_id'] for f in self.pending_files] + 
+                                [item['message_id'] for item in self.link_to_file_mapping.values()],
                 "timestamp": datetime.utcnow().isoformat(),
                 "interrupted": interrupted,
-                "completed_scan_type": self.completed_scan_type,
-                "catalog_mode": getattr(self, 'catalog_mode', None)
+                "completed_scan_type": self.completed_scan_type
             }
             await database.save_leech_progress(self.message.from_user.id, self.channel_id, progress)
-            
-            # If interrupted during catalog building, keep status as incomplete
-            if interrupted and getattr(self, 'catalog_mode', None) == 'full':
-                await database.update_channel_metadata(
-                    self.channel_chat_id,
-                    catalog_status='incomplete'
-                )
                 
         except Exception as e:
             LOGGER.error(f"[cleech] Error saving progress: {e}")
 
     async def _show_final_results(self, processed_messages, skipped_duplicates):
+        """Display final results after completion"""
         total_attempted = self.completed_count + self.failed_count
         success_rate = (self.completed_count / total_attempted * 100) if total_attempted > 0 else 0
         
-        if self.catalog_mode == 'filter_only':
-            text = (
-                f"**✅ Channel Leech Completed! (Catalog Mode)**\n\n"
-                f"**📊 Processing Results:**\n"
-                f"**Files analyzed:** {processed_messages:,}\n"
-                f"**Filter rejections:** {skipped_duplicates:,}\n"
-                f"**Downloaded:** {self.completed_count} | **Failed:** {self.failed_count}\n"
-                f"**Success Rate:** {success_rate:.1f}%\n\n"
-                f"**⚡ Mode:** Used existing catalog (super fast!)\n"
-                f"**📈 Efficiency:** {((processed_messages - skipped_duplicates) / processed_messages * 100) if processed_messages > 0 else 0:.1f}% filter match rate"
-            )
-        else:
-            text = (
-                f"**✅ Channel Leech Completed!**\n\n"
-                f"**📊 Scanning Results:**\n"
-                f"**Scanned:** {processed_messages:,} items\n"
-                f"**Downloaded:** {self.completed_count} | **Failed:** {self.failed_count}\n"
-                f"**Success Rate:** {success_rate:.1f}%\n\n"
-                f"**📈 Next scan will use catalog (99% faster!)**"
-            )
+        text = (
+            f"**✅ Channel Leech Completed!**\n\n"
+            f"**📊 Scanning Results:**\n"
+            f"**Scanned:** {processed_messages:,} items\n"
+            f"**Downloaded:** {self.completed_count} | **Failed:** {self.failed_count}\n"
+            f"**Success Rate:** {success_rate:.1f}%"
+        )
+        
         await self._safe_edit_message(self.status_message, text)
 
     def _generate_clean_filename(self, file_info):
