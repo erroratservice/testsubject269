@@ -332,57 +332,33 @@ class DbManager:
             LOGGER.error(f"Error adding failed file entry: {e}")
 
     async def check_file_exists(self, file_unique_id=None, file_hash=None, file_info=None):
-        """Optimized file existence check - 100x faster than regex version"""
+        """Check if file exists in catalog (both completed AND failed files)"""
         try:
-            # Fast path: check by unique identifiers first (indexed fields)
+            if file_info:
+                base_name = get_duplicate_check_name(file_info)
+                
+                for ext in COMMON_EXTENSIONS:
+                    for field in ("caption_first_line", "file_name"):
+                        value = base_name + ext
+                        query = {field: {"$regex": f"^{re.escape(value)}$", "$options": "i"}}
+                        result = await self._db.file_catalog.find_one(query)
+                        if result:
+                            return True
+            
             if file_unique_id:
-                result = await self._db.file_catalog.find_one(
-                    {"file_unique_id": file_unique_id},
-                    {"_id": 1}  # Only return _id for faster query
-                )
+                result = await self._db.file_catalog.find_one({"file_unique_id": file_unique_id})
                 if result:
                     return True
             
             if file_hash:
-                result = await self._db.file_catalog.find_one(
-                    {"file_hash": file_hash},
-                    {"_id": 1}
-                )
-                if result:
-                    return True
-            
-            # Filename-based check with exact match (NO REGEX!)
-            if file_info:
-                # Get the sanitized filename
-                sanitized_name = file_info.get('sanitized_name') or file_info.get('file_name', '')
-                
-                if not sanitized_name:
-                    return False
-                
-                # Log every 500th check
-                import random
-                if random.randint(1, 500) == 1:
-                    LOGGER.info(f"[CHECK-DEBUG] Checking: {sanitized_name[:50]}...")
-                
-                # Single query with OR - 100x faster than regex loop!
-                result = await self._db.file_catalog.find_one(
-                    {
-                        "$or": [
-                            {"sanitized_name": sanitized_name},
-                            {"file_name": sanitized_name},
-                            {"caption_first_line": sanitized_name}
-                        ]
-                    },
-                    {"_id": 1}
-                )
-                
+                result = await self._db.file_catalog.find_one({"file_hash": file_hash})
                 if result:
                     return True
             
             return False
-            
+        
         except PyMongoError as e:
-            LOGGER.error(f"[CHECK-DEBUG] Error checking file: {e}")
+            LOGGER.error(f"Error checking file exists: {e}")
             return False
 
     async def should_retry_failed_file(self, file_info, max_retries=2):
@@ -542,8 +518,6 @@ class DbManager:
     async def get_catalog_files_with_stats(self, channel_id, filter_tags=None, filter_mode='and', scan_type=None, from_msg_id=None, to_msg_id=None):
         """Get files from catalog with enhanced filtering and detailed statistics tracking"""
         try:
-            LOGGER.info(f"[CATALOG-DEBUG] Starting catalog query for channel {channel_id}")
-            
             # Initialize detailed statistics tracking
             stats = {
                 'total_processed': 0,
@@ -551,7 +525,7 @@ class DbManager:
                 'already_downloaded': 0,
                 'type_filtered': 0,
                 'range_filtered': 0,
-                'duplicate_rejected': 0
+                'duplicate_rejected': 0  # NEW: Track queue duplicates separately
             }
             
             # Build optimized MongoDB aggregation pipeline
@@ -559,14 +533,10 @@ class DbManager:
             base_match_stage = {"channel_id": channel_id}
             pipeline.append({"$match": base_match_stage})
             
-            LOGGER.info(f"[CATALOG-DEBUG] Building aggregation pipeline...")
-            
             # Count total files before any filtering
             total_cursor = self._db.channel_catalog.aggregate([{"$match": base_match_stage}, {"$count": "total"}])
             total_result = await total_cursor.to_list(1)
             total_in_channel = total_result[0]['total'] if total_result else 0
-            
-            LOGGER.info(f"[CATALOG-DEBUG] Total files in channel catalog: {total_in_channel}")
             
             # Stage 2: Apply message range filters
             if from_msg_id or to_msg_id:
@@ -606,8 +576,6 @@ class DbManager:
             before_text_filtering = before_text_result[0]['total'] if before_text_result else 0
             stats['total_processed'] = before_text_filtering
             
-            LOGGER.info(f"[CATALOG-DEBUG] Files before text filtering: {before_text_filtering}")
-            
             # Stage 4: Apply filter tags
             if filter_tags:
                 if filter_mode == 'or':
@@ -625,7 +593,6 @@ class DbManager:
                 after_text_result = await after_text_cursor.to_list(1)
                 after_text_filtering = after_text_result[0]['total'] if after_text_result else 0
                 stats['filter_rejected'] = before_text_filtering - after_text_filtering
-                LOGGER.info(f"[CATALOG-DEBUG] After text filtering: {after_text_filtering}, rejected: {stats['filter_rejected']}")
             
             # Stage 5: Sort and project
             pipeline.append({"$sort": {"message_id": -1}})
@@ -637,47 +604,33 @@ class DbManager:
                 }
             })
             
-            # Execute aggregation with extended timeout and error recovery
-            LOGGER.info(f"[CATALOG-DEBUG] Executing aggregation pipeline...")
-            cursor = self._db.channel_catalog.aggregate(
-                pipeline,
-                allowDiskUse=True,
-                maxTimeMS=600000,  # 10 minutes
-                batchSize=500
-            )
+            # Execute aggregation
+            aggregation_options = {
+                "allowDiskUse": True,
+                "maxTimeMS": 300000,
+                "cursor": {"batchSize": 1000}
+            }
+            
+            cursor = self._db.channel_catalog.aggregate(pipeline, **aggregation_options)
             
             matched_files = []
             already_downloaded = 0
-            processed_count = 0
             
-            LOGGER.info(f"[CATALOG-DEBUG] Starting to process cursor results...")
-            
-            # Process results with cursor timeout recovery
-            try:
-                async for entry in cursor:
-                    processed_count += 1
-                    
-                    # Log progress every 1000 files
-                    if processed_count % 1000 == 0:
-                        LOGGER.info(f"[CATALOG-DEBUG] Processed {processed_count} files, matched: {len(matched_files)}, already downloaded: {already_downloaded}")
-                    
-                    file_info = entry['file_info']
-                    sanitized_name = file_info.get('sanitized_name', file_info.get('file_name', ''))
-                    
-                    # Check if file already exists (downloaded or failed)
-                    if not await self.check_file_exists(file_info=file_info):
-                        matched_files.append({
-                            'message_id': entry['message_id'],
-                            'url': f"https://t.me/c/{str(channel_id)[4:]}/{entry['message_id']}",
-                            'filename': sanitized_name,
-                            'file_info': file_info
-                        })
-                    else:
-                        already_downloaded += 1
-            except PyMongoError as cursor_error:
-                LOGGER.warning(f"[CATALOG-DEBUG] Cursor timeout at {processed_count} files, returning partial results: {cursor_error}")
-            
-            LOGGER.info(f"[CATALOG-DEBUG] Completed! Processed: {processed_count}, Matched: {len(matched_files)}, Already downloaded: {already_downloaded}")
+            # Process results with detailed tracking
+            async for entry in cursor:
+                file_info = entry['file_info']
+                sanitized_name = file_info.get('sanitized_name', file_info.get('file_name', ''))
+                
+                # Check if file already exists (downloaded or failed)
+                if not await self.check_file_exists(file_info=file_info):
+                    matched_files.append({
+                        'message_id': entry['message_id'],
+                        'url': f"https://t.me/c/{str(channel_id)[4:]}/{entry['message_id']}",
+                        'filename': sanitized_name,
+                        'file_info': file_info
+                    })
+                else:
+                    already_downloaded += 1
             
             # Update final statistics
             stats['already_downloaded'] = already_downloaded
@@ -685,7 +638,7 @@ class DbManager:
             return matched_files, stats
             
         except Exception as e:
-            LOGGER.error(f"[CATALOG-DEBUG] Error in catalog query: {e}")
+            LOGGER.error(f"Error in optimized catalog query with stats: {e}")
             return [], {'total_processed': 0, 'filter_rejected': 0, 'already_downloaded': 0, 'type_filtered': 0, 'range_filtered': 0, 'duplicate_rejected': 0}
 
 
