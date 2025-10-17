@@ -315,7 +315,6 @@ class SimpleChannelLeechCoordinator(TaskListener):
             batch_size = 100
             batch_sleep = 5
             processed_messages = 0
-            completion_task = None
             
             # Timing and throttling
             last_status_update = 0
@@ -343,8 +342,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 while len(self.our_active_links) < self.max_concurrent and self.pending_files:
                     await self._start_next_download()
 
-            if self.our_active_links or self.pending_files:
-                completion_task = asyncio.create_task(self._wait_for_completion_callback_mode())
+            # REMOVED: completion_task creation here - will run after scan completes
 
             # Get scan totals
             scan_totals = {}
@@ -450,8 +448,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
                     self.last_minute_check = current_time
                 self.messages_processed_this_minute += 1
                 
-                if completion_task is None and (self.our_active_links or self.pending_files):
-                    completion_task = asyncio.create_task(self._wait_for_completion_callback_mode())
+                # REMOVED: completion_task creation here - will run after scan completes
 
                 # Status updates
                 if current_time - last_status_update >= status_update_interval:
@@ -529,15 +526,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
             self.completed_scan_type = "all" if not self.scan_type else self.scan_type
             await self._save_progress()
             
-            # Cancel completion task
-            if completion_task and not completion_task.done():
-                completion_task.cancel()
-                try:
-                    await completion_task
-                except asyncio.CancelledError:
-                    pass
-            
-            # Wait for completion with download progress updates
+            # Wait for completion with download progress updates (NO task creation - just call it)
             await self._wait_for_completion_callback_mode()
             await self._show_final_results(processed_messages, 0)
             
