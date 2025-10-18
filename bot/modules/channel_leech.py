@@ -842,7 +842,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
             for msg_id in pending_msg_ids:
                 try:
                     message = await user.get_messages(self.channel_chat_id, msg_id)
-                    file_info = await scanner._extract_file_info(message)
+                    file_info = scanner._extract_file_info(message)
                     if file_info:
                         message_link = f"https://t.me/c/{str(self.channel_chat_id)[4:]}/{msg_id}"
                         self.pending_files.append({
@@ -875,7 +875,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 break
                 
             try:
-                file_info = await scanner._extract_file_info(message)
+                file_info = scanner._extract_file_info(message)
                 if not file_info:
                     continue
                 
