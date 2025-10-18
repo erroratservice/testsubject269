@@ -36,7 +36,7 @@ class ChannelScanner:
         self.batch_sleep = 0.3  
         self.api_delay = 0.05  # 50ms between API calls
         self.status_update_interval = 10
-        self.last_status_update = 0         
+        self.last_status_update = 0.0       
 
     async def scan(self, status_msg=None):
         """Main scanning function with ID-based batching"""
@@ -163,58 +163,79 @@ class ChannelScanner:
 
     async def _process_batch(self, messages):
         """
-        Process a batch of messages in parallel
-        All operations use sanitized_name for consistency
+        Process a batch of messages with batch duplicate checking
+        Much faster than individual checks
         """
-        tasks = []
-        
+        # STEP 1: Extract all file infos synchronously (fast)
+        file_items = []
         for message in messages:
             if not message:
                 continue
-            
-            # Extract file info with sanitized_name
             file_info = self._extract_file_info_sync(message)
             if file_info:
-                # Create async task for each file
-                tasks.append(self._process_single_file(message, file_info))
+                file_items.append({
+                    'message': message,
+                    'file_info': file_info
+                })
         
-        # Process all files in batch concurrently
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-
-    async def _process_single_file(self, message, file_info):
-        """
-        Process individual file with sanitized_name-based duplicate check
-        """
-        try:
-            # Apply filter tags on sanitized_name
+        if not file_items:
+            return
+        
+        # STEP 2: Batch check all files at once (ONE MongoDB query!)
+        file_infos_list = [item['file_info'] for item in file_items]
+        existing_identifiers = await database.check_files_exist_batch(file_infos_list)
+        
+        # STEP 3: Filter out duplicates
+        new_files = []
+        for item in file_items:
+            file_info = item['file_info']
+            
+            # Check if any identifier matches existing
+            is_duplicate = (
+                file_info.get('file_unique_id') in existing_identifiers or
+                file_info.get('file_hash') in existing_identifiers or
+                file_info.get('sanitized_name') in existing_identifiers
+            )
+            
+            if is_duplicate:
+                self.skipped_duplicates += 1
+                LOGGER.debug(f"Skipped duplicate: {file_info.get('sanitized_name')}")
+            else:
+                new_files.append(item)
+        
+        # STEP 4: Apply filter tags to new files only
+        filtered_files = []
+        for item in new_files:
+            file_info = item['file_info']
             if self.filter_tags:
                 search_text = f"{file_info['sanitized_name']} {file_info['search_text']}"
                 if not any(tag.lower() in search_text.lower() for tag in self.filter_tags):
-                    return
+                    continue
+            filtered_files.append(item)
+        
+        # STEP 5: Batch insert all new files
+        if filtered_files:
+            insert_tasks = []
+            for item in filtered_files:
+                insert_tasks.append(
+                    database.add_file_entry(
+                        self.channel_id,
+                        item['message'].id,
+                        item['file_info']
+                    )
+                )
             
-            # DUPLICATE CHECK using sanitized_name
-            # This checks: sanitized_name, caption_first_line, file_name, file_unique_id, file_hash
-            exists = await database.check_file_exists(
-                file_unique_id=file_info.get('file_unique_id'),
-                file_hash=file_info.get('file_hash'),
-                file_info=file_info  # Contains sanitized_name
-            )
+            # Insert all concurrently
+            results = await asyncio.gather(*insert_tasks, return_exceptions=True)
             
-            if exists:
-                self.skipped_duplicates += 1
-                LOGGER.debug(f"Skipped duplicate: {file_info['sanitized_name']}")
-                return
+            # Count successful inserts
+            successful = sum(1 for r in results if not isinstance(r, Exception))
+            self.db_entries += successful
             
-            # Add to database with sanitized_name
-            await database.add_file_entry(
-                self.channel_id, message.id, file_info
-            )
-            self.db_entries += 1
-            LOGGER.debug(f"Added new file: {file_info['sanitized_name']}")
-            
-        except Exception as e:
-            LOGGER.error(f"Error processing file {file_info.get('sanitized_name', 'unknown')}: {e}")
+            # Log any errors
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    LOGGER.error(f"Error inserting file {filtered_files[i]['file_info'].get('sanitized_name')}: {result}")
 
     def _extract_file_info_sync(self, message):
         """
