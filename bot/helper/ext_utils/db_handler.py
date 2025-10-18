@@ -340,21 +340,51 @@ class DbManager:
         except PyMongoError as e:
             LOGGER.error(f"Error adding failed file entry: {e}")
 
-    async def check_file_exists(self, file_unique_id=None, file_hash=None, file_info=None):
-        """Check if file exists in catalog (both completed AND failed files)"""
+    async def check_file_exists(self, file_unique_id=None, file_hash=None, file_info=None, prt_mode=False):
+        """
+        Check if file exists in catalog (both completed AND failed files)
+        
+        Args:
+            file_unique_id: Telegram file unique ID
+            file_hash: File hash
+            file_info: File info dict
+            prt_mode: If True, also check with XXX/PRT inserted for better matching
+        """
         try:
             if file_info:
                 base_name = get_duplicate_check_name(file_info)
                 
-                for ext in COMMON_EXTENSIONS:
-                    for field in ("caption_first_line", "file_name"):
-                        value = base_name + ext
-                        query = {field: {"$regex": f"^{re.escape(value)}$", "$options": "i"}}
-                        
-                        result = await self._db.file_catalog.find_one(query)
-                        if result:
-                            return True
+                # Variants to check
+                variants_to_check = [base_name]
+                
+                # Only if prt_mode is True, also check with XXX/PRT added
+                if prt_mode:
+                    # Insert XXX before .720p/.1080p and PRT before extension
+                    enhanced_name = base_name
+                    
+                    # Add XXX before quality if not present
+                    if not re.search(r'\bXXX\b', enhanced_name, re.IGNORECASE):
+                        enhanced_name = re.sub(r'(\.720p|\.1080p)', r'.XXX\1', enhanced_name, flags=re.IGNORECASE)
+                    
+                    # Add PRT before extension if not present
+                    if not re.search(r'\.PRT\.', enhanced_name, re.IGNORECASE):
+                        enhanced_name = re.sub(r'(\.[a-z0-9]{3,4})$', r'.PRT\1', enhanced_name, flags=re.IGNORECASE)
+                    
+                    # Only add if it's different from original
+                    if enhanced_name.lower() != base_name.lower():
+                        variants_to_check.append(enhanced_name)
+                
+                # Check all variants
+                for name_to_check in variants_to_check:
+                    for ext in COMMON_EXTENSIONS:
+                        for field in ("caption_first_line", "file_name", "sanitized_name"):
+                            value = name_to_check + ext
+                            query = {field: {"$regex": f"^{re.escape(value)}$", "$options": "i"}}
+                            result = await self._db.file_catalog.find_one(query)
+                            if result:
+                                return True
             
+            # Existing checks for file_unique_id and file_hash
             if file_unique_id:
                 result = await self._db.file_catalog.find_one({"file_unique_id": file_unique_id})
                 if result:
@@ -366,7 +396,7 @@ class DbManager:
                     return True
             
             return False
-        
+            
         except PyMongoError as e:
             LOGGER.error(f"Error checking file exists: {e}")
             return False
