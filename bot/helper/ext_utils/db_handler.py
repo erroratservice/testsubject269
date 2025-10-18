@@ -346,25 +346,14 @@ class DbManager:
             if file_info:
                 base_name = get_duplicate_check_name(file_info)
                 
-                # DEBUG: Log what we're searching for
-                LOGGER.info(f"[CHECK-DEBUG] Searching for base: {base_name}")
-                LOGGER.info(f"[CHECK-DEBUG] From file_info caption: {file_info.get('caption_first_line')}")
-                LOGGER.info(f"[CHECK-DEBUG] From file_info filename: {file_info.get('file_name')}")
-                
                 for ext in COMMON_EXTENSIONS:
                     for field in ("caption_first_line", "file_name"):
                         value = base_name + ext
                         query = {field: {"$regex": f"^{re.escape(value)}$", "$options": "i"}}
                         
-                        # DEBUG: Log the query
-                        LOGGER.info(f"[CHECK-DEBUG] Query: {field} = {value}")
-                        
                         result = await self._db.file_catalog.find_one(query)
                         if result:
-                            LOGGER.info(f"[CHECK-DEBUG] FOUND MATCH in field '{field}'!")
                             return True
-                
-                LOGGER.info(f"[CHECK-DEBUG] NO MATCH FOUND after checking all extensions")
             
             if file_unique_id:
                 result = await self._db.file_catalog.find_one({"file_unique_id": file_unique_id})
