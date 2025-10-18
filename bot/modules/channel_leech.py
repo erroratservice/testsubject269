@@ -750,7 +750,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
     async def _coordinate_simple_leech(self):
         """Simple scan - no catalog complexity"""
         try:
-            await self._register_coordinator()
+            self._register_coordinator()
             
             # Always do a simple scan (no catalog)
             await self._full_scan()
