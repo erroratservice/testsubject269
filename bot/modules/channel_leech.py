@@ -45,7 +45,21 @@ def sanitize_filename(filename):
     if not filename:
         filename = "file"
     return filename
-
+def enhance_prt_filename(filename):
+    """Add XXX before quality and PRT before extension if missing (for PRT mode downloads)"""
+    if not filename:
+        return filename
+    
+    # Only enhance if XXX is missing
+    if not re.search(r'\bXXX\b', filename, re.IGNORECASE):
+        filename = re.sub(r'(\.720p|\.1080p)', r'.XXX\1', filename, flags=re.IGNORECASE)
+    
+    # Only enhance if PRT is missing (before the file extension)
+    if not re.search(r'\.PRT\.', filename, re.IGNORECASE):
+        filename = re.sub(r'(\.[a-z0-9]{3,4})$', r'.PRT\1', filename, flags=re.IGNORECASE)
+    
+    return filename
+    
 class SimpleChannelLeechCoordinator(TaskListener):
     # Memory-safe coordinator tracking using WeakValueDictionary
     _active_coordinators = weakref.WeakValueDictionary()
@@ -983,21 +997,28 @@ class SimpleChannelLeechCoordinator(TaskListener):
         await self._safe_edit_message(self.status_message, text)
 
     def _generate_clean_filename(self, file_info):
+        """Generate clean filename with optional PRT enhancement"""
         original_filename = file_info.get('file_name', '')
         base_name = original_filename
+        
         if self.use_caption_as_filename and file_info.get('caption_first_line'):
             base_name = file_info['caption_first_line'].strip()
         
         clean_base = sanitize_filename(base_name)
         
+        # Apply PRT enhancement if in prt_mode BEFORE adding extension
+        if self.prt_mode:
+            clean_base = enhance_prt_filename(clean_base)
+        
+        # Add extension if missing
         original_ext = os.path.splitext(original_filename)[1]
         media_extensions = {'.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v',
                             '.mp3', '.flac', '.wav', '.aac', '.m4a', '.ogg',
                             '.zip', '.rar', '.7z', '.tar', '.gz'}
-                            
+        
         if original_ext.lower() in media_extensions and not clean_base.lower().endswith(original_ext.lower()):
             clean_base += original_ext
-            
+        
         return clean_base
 
     def _parse_arguments(self, args):
