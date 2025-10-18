@@ -353,12 +353,6 @@ class DbManager:
     async def check_file_exists(self, file_unique_id=None, file_hash=None, file_info=None, prt_mode=False):
         """
         Check if file exists in catalog (both completed AND failed files)
-        
-        Args:
-            file_unique_id: Telegram file unique ID
-            file_hash: File hash
-            file_info: File info dict
-            prt_mode: If True, also check with XXX/PRT inserted for better matching
         """
         try:
             if file_info:
@@ -376,33 +370,41 @@ class DbManager:
                         enhanced_name = re.sub(r'(\.720p|\.1080p)', r'.XXX\1', enhanced_name, flags=re.IGNORECASE)
                     
                     # Add PRT before extension if not present
-                    # FIXED: Check for .PRT at the end or before extension
                     if not re.search(r'\.PRT(?:\.[a-z0-9]{3,4})?$', enhanced_name, re.IGNORECASE):
                         enhanced_name = re.sub(r'(\.[a-z0-9]{3,4})$', r'.PRT\1', enhanced_name, flags=re.IGNORECASE)
                     
-                    # Only add if it's different from original
                     if enhanced_name.lower() != base_name.lower():
                         variants_to_check.append(enhanced_name)
                 
                 # Check all variants
                 for name_to_check in variants_to_check:
+                    # Try with different extensions
                     for ext in COMMON_EXTENSIONS:
-                        for field in ("caption_first_line", "file_name", "sanitized_name"):
-                            value = name_to_check + ext
-                            query = {field: {"$regex": f"^{re.escape(value)}$", "$options": "i"}}
-                            result = await self._db.file_catalog.find_one(query)
-                            if result:
-                                return True
+                        search_patterns = [
+                            name_to_check + ext,           # With extension
+                            name_to_check,                 # Without extension
+                        ]
+                        
+                        for pattern in search_patterns:
+                            for field in ("caption_first_line", "file_name", "sanitized_name"):
+                                query = {field: {"$regex": f"^{re.escape(pattern)}$", "$options": "i"}}
+                                result = await self._db.file_catalog.find_one(query, {"_id": 1})
+                                if result:
+                                    LOGGER.info(f"[DB] Duplicate found: {pattern} in {field}")
+                                    return True
             
-            # Existing checks for file_unique_id and file_hash
+            # Check by file_unique_id
             if file_unique_id:
-                result = await self._db.file_catalog.find_one({"file_unique_id": file_unique_id})
+                result = await self._db.file_catalog.find_one({"file_unique_id": file_unique_id}, {"_id": 1})
                 if result:
+                    LOGGER.info(f"[DB] Duplicate found by file_unique_id: {file_unique_id}")
                     return True
             
+            # Check by file_hash
             if file_hash:
-                result = await self._db.file_catalog.find_one({"file_hash": file_hash})
+                result = await self._db.file_catalog.find_one({"file_hash": file_hash}, {"_id": 1})
                 if result:
+                    LOGGER.info(f"[DB] Duplicate found by file_hash: {file_hash}")
                     return True
             
             return False
