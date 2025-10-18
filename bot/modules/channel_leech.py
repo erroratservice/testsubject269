@@ -46,20 +46,34 @@ def sanitize_filename(filename):
         filename = "file"
     return filename
 def enhance_prt_filename(filename):
-    """Add XXX before quality and PRT before extension if missing (for PRT mode downloads)"""
+    """Add XXX before quality and PRT ONLY before .mp4/.mkv extension"""
     if not filename:
         return filename
     
-    # Only enhance if XXX is missing
+    # Add XXX before quality if missing
     if not re.search(r'\bXXX\b', filename, re.IGNORECASE):
         filename = re.sub(r'(\.720p|\.1080p)', r'.XXX\1', filename, flags=re.IGNORECASE)
     
-    # Only enhance if PRT is missing (check for .PRT followed by extension OR end of string)
-    # This prevents adding PRT if it's already there before the extension
-    if not re.search(r'\.PRT(?:\.[a-z0-9]{3,4})?$', filename, re.IGNORECASE):
-        filename = re.sub(r'(\.[a-z0-9]{3,4})$', r'.PRT\1', filename, flags=re.IGNORECASE)
+    # Check if already has .PRT before extension
+    if re.search(r'\.PRT(?:\.(mp4|mkv))?$', filename, re.IGNORECASE):
+        return filename
     
-    return filename
+    # Split filename to find extension
+    basename, dot, ext = filename.rpartition('.')
+    ext_with_dot = f".{ext}" if dot else ""
+    
+    # Only add .PRT before .mp4 or .mkv
+    if ext_with_dot.lower() in [".mp4", ".mkv"]:
+        if not basename.lower().endswith('.prt'):
+            return f"{basename}.PRT{ext_with_dot}"
+        else:
+            return filename
+    else:
+        # No valid extension, add .PRT.mp4 at the end
+        if not filename.lower().endswith('.prt'):
+            return f"{filename}.PRT.mp4"
+        else:
+            return f"{filename}.mp4"
     
 class SimpleChannelLeechCoordinator(TaskListener):
     # Memory-safe coordinator tracking using WeakValueDictionary
