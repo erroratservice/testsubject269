@@ -304,6 +304,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
             return False
 
     async def _full_scan(self):
+        completion_task = None
         """Simple channel scan and download"""
         try:
             await self._safe_edit_message(self.status_message, 
