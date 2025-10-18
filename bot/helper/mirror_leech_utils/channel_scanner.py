@@ -5,62 +5,66 @@ from datetime import datetime
 from pyrogram.errors import FloodWait, PeerIdInvalid
 from pyrogram import types
 
-from ..ext_utils.db_handler import database
+from ..ext_utils.db_handler import database, sanitize_filename
 from ..telegram_helper.message_utils import edit_message
 
 LOGGER = logging.getLogger(__name__)
 
 class ChannelScanner:
     """
-    Optimized channel scanner using ID-based batching:
-    1. User session gets latest message ID (fast)
-    2. Bot session fetches messages in batches of 200 by ID (20x faster)
-    3. Processes batches with parallel DB operations
+    Optimized channel scanner with sanitized_name priority system:
+    1. Caption first line → sanitized_name (PRIMARY)
+    2. File name → sanitized_name (FALLBACK)
+    3. All operations use sanitized_name for consistency
     """
     
     def __init__(self, user_client, bot_client, channel_id, batch_size=200, max_messages=0, filter_tags=None):
         self.user_client = user_client
-        self.bot_client = bot_client  # ADD bot client
+        self.bot_client = bot_client
         self.channel_id = channel_id
-        self.batch_size = batch_size  # Increased from 100 to 200
+        self.batch_size = batch_size
         self.max_messages = max_messages
         self.filter_tags = filter_tags or []
         self.running = True
         self.processed = 0
         self.db_entries = 0
+        self.skipped_duplicates = 0
         self.status_message = None
         self.listener = None
         
-        # Optimized timings
-        self.batch_sleep = 2  # Reduced from 5s to 2s
-        self.api_delay = 0.05  # 50ms between API calls (well under 20/sec limit)
+        # Optimized timings for Telegram API limits
+        self.batch_sleep = 2  # 2s between batches
+        self.api_delay = 0.05  # 50ms between API calls
 
     async def scan(self, status_msg=None):
         """Main scanning function with ID-based batching"""
         self.status_message = status_msg
         
         try:
-            # STEP 1: Use user session to get channel info and latest message ID
+            # STEP 1: Get channel info using user session
             try:
                 chat = await self.user_client.get_chat(self.channel_id)
                 await self._update_status(f"📋 Scanning channel: **{chat.title}**")
+                LOGGER.info(f"Starting scan for channel: {chat.title} ({self.channel_id})")
             except PeerIdInvalid:
                 error_msg = (
                     f"❌ **Access Denied to {self.channel_id}**\n\n"
                     f"**Reason:** User session is not a member of this channel\n\n"
                     f"**Solutions:**\n"
                     f"• Join the channel with your user account\n"
-                    f"• For private channels: Get invited first"
+                    f"• For private channels: Get invited first\n"
+                    f"• Verify the channel ID is correct"
                 )
                 await self._update_status(error_msg)
                 return
             except Exception as e:
-                raise e
+                LOGGER.error(f"Error accessing channel: {e}")
+                raise
             
-            # STEP 2: Get total message count and latest message ID using user session
+            # STEP 2: Get total message count and latest message ID
             total_messages = await self.user_client.get_chat_history_count(self.channel_id)
             
-            # Get the latest message ID (starting point)
+            # Get latest message ID (starting point)
             latest_msg = None
             async for msg in self.user_client.get_chat_history(self.channel_id, limit=1):
                 latest_msg = msg
@@ -73,14 +77,19 @@ class ChannelScanner:
             start_id = latest_msg.id
             LOGGER.info(f"Channel has {total_messages} messages, starting from ID {start_id}")
             
-            # STEP 3: Process in batches using bot session (much faster)
+            # STEP 3: Process in batches using bot session
             await self._process_in_batches(start_id, total_messages)
             
             # Final status
             if not (hasattr(self, 'listener') and self.listener and self.listener.is_cancelled):
-                await self._update_status(
-                    f'✅ **Scan complete!** Processed: {self.processed} | New files: {self.db_entries}'
+                summary = (
+                    f'✅ **Scan complete!**\n\n'
+                    f'📊 Processed: {self.processed} messages\n'
+                    f'✨ New files: {self.db_entries}\n'
+                    f'🔄 Duplicates skipped: {self.skipped_duplicates}'
                 )
+                await self._update_status(summary)
+                LOGGER.info(f"Scan complete: {self.db_entries} new files, {self.skipped_duplicates} duplicates")
 
         except FloodWait as e:
             LOGGER.warning(f'FloodWait: waiting {e.x}s')
@@ -100,17 +109,17 @@ class ChannelScanner:
         while current_id > 0:
             # Check cancellation
             if not self.running or (hasattr(self, 'listener') and self.listener and self.listener.is_cancelled):
-                LOGGER.info("Scan cancelled")
+                LOGGER.info("Scan cancelled by user")
                 break
             
-            # Generate batch of message IDs (200 at a time)
+            # Generate batch of message IDs (200 at a time for optimal speed)
             message_ids = list(range(max(1, current_id - self.batch_size + 1), current_id + 1))
             message_ids.reverse()  # Process newest to oldest
             
             batch_num += 1
-            LOGGER.info(f"Batch {batch_num}: Fetching messages {message_ids[0]} to {message_ids[-1]}")
+            LOGGER.info(f"Batch {batch_num}: Fetching messages {message_ids[-1]}-{message_ids[0]}")
             
-            # STEP 4: Use BOT session to fetch batch (20x faster than iteration)
+            # Use BOT session to fetch batch (20 messages/sec = fast!)
             try:
                 messages = await self.bot_client.get_messages(
                     self.channel_id,
@@ -126,11 +135,13 @@ class ChannelScanner:
                 self.processed += len(valid_messages)
                 
                 # Update status
+                progress_pct = (self.processed / total_messages * 100) if total_messages > 0 else 0
                 await self._update_status(
-                    f'🔍 Batch {batch_num} | Scanned: {self.processed}/{total_messages} | New files: {self.db_entries}'
+                    f'🔍 Batch {batch_num} | {self.processed}/{total_messages} ({progress_pct:.1f}%)\n'
+                    f'✨ New: {self.db_entries} | 🔄 Skipped: {self.skipped_duplicates}'
                 )
                 
-                # Small delay to stay under rate limits
+                # Sleep between batches to respect rate limits
                 await asyncio.sleep(self.batch_sleep)
                 
             except FloodWait as e:
@@ -150,14 +161,17 @@ class ChannelScanner:
                 break
 
     async def _process_batch(self, messages):
-        """Process a batch of messages in parallel"""
+        """
+        Process a batch of messages in parallel
+        All operations use sanitized_name for consistency
+        """
         tasks = []
         
         for message in messages:
             if not message:
                 continue
             
-            # Extract file info
+            # Extract file info with sanitized_name
             file_info = self._extract_file_info_sync(message)
             if file_info:
                 # Create async task for each file
@@ -168,36 +182,43 @@ class ChannelScanner:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _process_single_file(self, message, file_info):
-        """Process individual file with duplicate check"""
+        """
+        Process individual file with sanitized_name-based duplicate check
+        """
         try:
-            # Apply filter tags
+            # Apply filter tags on sanitized_name
             if self.filter_tags:
-                if not any(tag.lower() in file_info['search_text'].lower() for tag in self.filter_tags):
+                search_text = f"{file_info['sanitized_name']} {file_info['search_text']}"
+                if not any(tag.lower() in search_text.lower() for tag in self.filter_tags):
                     return
             
-            # Check if already exists
+            # DUPLICATE CHECK using sanitized_name
+            # This checks: sanitized_name, caption_first_line, file_name, file_unique_id, file_hash
             exists = await database.check_file_exists(
                 file_unique_id=file_info.get('file_unique_id'),
                 file_hash=file_info.get('file_hash'),
-                file_info=file_info
+                file_info=file_info  # Contains sanitized_name
             )
             
             if exists:
+                self.skipped_duplicates += 1
+                LOGGER.debug(f"Skipped duplicate: {file_info['sanitized_name']}")
                 return
             
-            # Add to database
+            # Add to database with sanitized_name
             await database.add_file_entry(
                 self.channel_id, message.id, file_info
             )
             self.db_entries += 1
+            LOGGER.debug(f"Added new file: {file_info['sanitized_name']}")
             
         except Exception as e:
-            LOGGER.error(f"Error processing file {file_info.get('file_name')}: {e}")
+            LOGGER.error(f"Error processing file {file_info.get('sanitized_name', 'unknown')}: {e}")
 
     def _extract_file_info_sync(self, message):
         """
-        Synchronous file info extraction (no await needed)
-        Much faster than async version
+        Extract file info with SANITIZED_NAME as primary identifier
+        Priority: caption_first_line → file_name
         """
         file_info = {}
         media = None
@@ -222,17 +243,29 @@ class ChannelScanner:
         file_info['date'] = message.date
         file_info['message_id'] = message.id
 
-        # Extract caption first line
+        # Extract caption first line (PRIORITY SOURCE)
         if message.caption:
             first_line = message.caption.split('\n')[0].strip()
             file_info['caption_first_line'] = first_line
         else:
             file_info['caption_first_line'] = ''
 
+        # === SANITIZED_NAME GENERATION (CORE LOGIC) ===
+        # Priority: caption_first_line > file_name
+        if file_info['caption_first_line']:
+            # Use caption as primary source
+            base_name = file_info['caption_first_line']
+        else:
+            # Fallback to file_name
+            base_name = file_info['file_name']
+        
+        # Apply sanitization (same function as channel_leech)
+        file_info['sanitized_name'] = sanitize_filename(base_name)
+
         # Build searchable text
         file_info['search_text'] = f"{file_info['file_name']} {file_info['caption_first_line']}"
 
-        # Generate hash
+        # Generate hash for duplicate detection
         hash_source = f"{file_info['file_unique_id']}|{file_info['file_size']}"
         file_info['file_hash'] = hashlib.md5(hash_source.encode()).hexdigest()
 
