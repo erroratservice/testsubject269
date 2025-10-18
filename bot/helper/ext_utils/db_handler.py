@@ -297,11 +297,19 @@ class DbManager:
     async def add_file_entry(self, channel_id, message_id, file_data):
         """Add successful file entry to catalog"""
         try:
+            # Use provided sanitized_name (which may have PRT enhancement)
+            sanitized_name = file_data.get('sanitized_name')
+            if not sanitized_name:
+                # Fallback to sanitizing caption or filename
+                base = file_data.get('caption_first_line') or file_data.get('file_name', '')
+                sanitized_name = sanitize_filename(base)
+            
             document = {
                 "channel_id": str(channel_id),
                 "message_id": message_id,
                 "file_unique_id": file_data.get("file_unique_id"),
                 "file_name": file_data.get("file_name"),
+                "sanitized_name": sanitized_name,
                 "caption_first_line": file_data.get("caption_first_line", ""),
                 "file_size": file_data.get("file_size", 0),
                 "mime_type": file_data.get("mime_type", ""),
@@ -312,7 +320,9 @@ class DbManager:
                 "status": "completed",
                 "download_date": datetime.utcnow()
             }
+            
             await self._db.file_catalog.insert_one(document)
+            
         except PyMongoError as e:
             LOGGER.error(f"Error adding file entry: {e}")
 
