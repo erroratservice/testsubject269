@@ -331,35 +331,31 @@ class DbManager:
         except PyMongoError as e:
             LOGGER.error(f"Error adding failed file entry: {e}")
 
-    async def check_file_exists(self, file_unique_id=None, file_hash=None, file_info=None):
-        """Check if file exists in catalog (both completed AND failed files)"""
-        try:
-            if file_info:
-                base_name = get_duplicate_check_name(file_info)
-                
-                for ext in COMMON_EXTENSIONS:
-                    for field in ("caption_first_line", "file_name"):
-                        value = base_name + ext
-                        query = {field: {"$regex": f"^{re.escape(value)}$", "$options": "i"}}
-                        result = await self._db.file_catalog.find_one(query)
-                        if result:
-                            return True
+async def check_file_exists(self, file_unique_id=None, file_hash=None, file_info=None):
+    """Check if file exists in catalog (both completed AND failed files)"""
+    try:
+        if file_info:
+            base_name = get_duplicate_check_name(file_info)
             
-            if file_unique_id:
-                result = await self._db.file_catalog.find_one({"file_unique_id": file_unique_id})
-                if result:
-                    return True
+            # DEBUG: Log what we're searching for
+            LOGGER.info(f"[CHECK-DEBUG] Searching for base: {base_name}")
+            LOGGER.info(f"[CHECK-DEBUG] From file_info caption: {file_info.get('caption_first_line')}")
+            LOGGER.info(f"[CHECK-DEBUG] From file_info filename: {file_info.get('file_name')}")
             
-            if file_hash:
-                result = await self._db.file_catalog.find_one({"file_hash": file_hash})
-                if result:
-                    return True
+            for ext in COMMON_EXTENSIONS:
+                for field in ("caption_first_line", "file_name"):
+                    value = base_name + ext
+                    query = {field: {"$regex": f"^{re.escape(value)}$", "$options": "i"}}
+                    
+                    # DEBUG: Log the query
+                    LOGGER.info(f"[CHECK-DEBUG] Query: {field} = {value}")
+                    
+                    result = await self._db.file_catalog.find_one(query)
+                    if result:
+                        LOGGER.info(f"[CHECK-DEBUG] FOUND MATCH!")
+                        return True
             
-            return False
-        
-        except PyMongoError as e:
-            LOGGER.error(f"Error checking file exists: {e}")
-            return False
+            LOGGER.info(f"[CHECK-DEBUG] NO MATCH FOUND")
 
     async def should_retry_failed_file(self, file_info, max_retries=2):
         """Check if a failed file should be retried based on retry count and time"""
