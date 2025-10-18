@@ -33,7 +33,7 @@ class ChannelScanner:
         self.listener = None
         
         # Optimized timings for Telegram API limits
-        self.batch_sleep = 2  # 2s between batches
+        self.batch_sleep = 0.3  
         self.api_delay = 0.05  # 50ms between API calls
         self.status_update_interval = 10
         self.last_status_update = 0         
