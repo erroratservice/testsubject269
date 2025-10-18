@@ -317,7 +317,14 @@ class SimpleChannelLeechCoordinator(TaskListener):
             await self._safe_edit_message(self.status_message, 
                 "**🚀 Starting channel scan...**")
             
-            scanner = ChannelScanner(user, self.channel_id, filter_tags=self.filter_tags)
+            scanner = ChannelScanner(
+                user_client=user,
+                bot_client=bot,
+                channel_id=self.channel_id,
+                filter_tags=self.filter_tags,
+                batch_size=200,
+                max_messages=0
+            )   
             
             # Scan variables
             batch_size = 100
@@ -1114,7 +1121,12 @@ class ChannelScanListener(TaskListener):
             f"Starting scan for `{self.channel_id}`{filter_text}"
         )
         try:
-            self.scanner = ChannelScanner(user, self.channel_id, filter_tags=self.filter_tags)
+            self.scanner = ChannelScanner(
+                user_client=user,
+                bot_client=bot,
+                channel_id=self.channel_id,
+                 filter_tags=self.filter_tags
+            )    
             self.scanner.listener = self
             await self.scanner.scan(status_msg)
         except Exception as e:
