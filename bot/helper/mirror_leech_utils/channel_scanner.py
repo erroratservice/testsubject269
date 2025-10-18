@@ -213,29 +213,52 @@ class ChannelScanner:
                     continue
             filtered_files.append(item)
         
-        # STEP 5: Batch insert all new files
+        # STEP 5: Batch insert all new files using bulk_write (MUCH FASTER!)
         if filtered_files:
-            insert_tasks = []
-            for item in filtered_files:
-                insert_tasks.append(
-                    database.add_file_entry(
-                        self.channel_id,
-                        item['message'].id,
-                        item['file_info']
-                    )
-                )
-            
-            # Insert all concurrently
-            results = await asyncio.gather(*insert_tasks, return_exceptions=True)
-            
-            # Count successful inserts
-            successful = sum(1 for r in results if not isinstance(r, Exception))
-            self.db_entries += successful
-            
-            # Log any errors
-            for i, result in enumerate(results):
-                if isinstance(result, Exception):
-                    LOGGER.error(f"Error inserting file {filtered_files[i]['file_info'].get('sanitized_name')}: {result}")
+            try:
+                from pymongo import InsertOne
+                from datetime import datetime
+                
+                # Prepare bulk insert operations
+                operations = []
+                for item in filtered_files:
+                    document = {
+                        "channel_id": str(self.channel_id),
+                        "message_id": item['message'].id,
+                        "file_unique_id": item['file_info'].get("file_unique_id"),
+                        "file_name": item['file_info'].get("file_name"),
+                        "sanitized_name": item['file_info'].get("sanitized_name"),
+                        "caption_first_line": item['file_info'].get("caption_first_line", ""),
+                        "file_size": item['file_info'].get("file_size", 0),
+                        "mime_type": item['file_info'].get("mime_type", ""),
+                        "file_hash": item['file_info'].get("file_hash"),
+                        "search_text": item['file_info'].get("search_text", ""),
+                        "date_added": item['file_info'].get("date"),
+                        "indexed_at": datetime.utcnow(),
+                        "status": "completed",
+                        "download_date": datetime.utcnow()
+                    }
+                    operations.append(InsertOne(document))
+                
+                # Bulk insert (much faster than individual inserts!)
+                if operations:
+                    result = await database._db.file_catalog.bulk_write(operations, ordered=False)
+                    self.db_entries += result.inserted_count
+                    LOGGER.info(f"Bulk inserted {result.inserted_count} files")
+                    
+            except Exception as e:
+                LOGGER.error(f"Error in bulk insert: {e}")
+                # Fallback to individual inserts if bulk fails
+                for item in filtered_files:
+                    try:
+                        await database.add_file_entry(
+                            self.channel_id,
+                            item['message'].id,
+                            item['file_info']
+                        )
+                        self.db_entries += 1
+                    except Exception as e2:
+                        LOGGER.error(f"Error inserting file {item['file_info'].get('sanitized_name')}: {e2}")
 
     def _extract_file_info_sync(self, message):
         """
