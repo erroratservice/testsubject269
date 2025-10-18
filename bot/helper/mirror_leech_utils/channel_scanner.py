@@ -171,7 +171,7 @@ class ChannelScanner:
         for message in messages:
             if not message:
                 continue
-            file_info = self._extract_file_info_sync(message)
+            file_info = self._extract_file_info(message)
             if file_info:
                 file_items.append({
                     'message': message,
@@ -260,7 +260,7 @@ class ChannelScanner:
                     except Exception as e2:
                         LOGGER.error(f"Error inserting file {item['file_info'].get('sanitized_name')}: {e2}")
 
-    def _extract_file_info_sync(self, message):
+    def _extract_file_info(self, message):
         """
         Extract file info with SANITIZED_NAME as primary identifier
         Priority: caption_first_line → file_name
