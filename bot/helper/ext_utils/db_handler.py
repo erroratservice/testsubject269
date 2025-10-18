@@ -57,18 +57,27 @@ def get_duplicate_check_name(file_info):
     """Return the sanitized base file name for duplication check"""
     base = None
     caption_line = file_info.get("caption_first_line")
+    
     if caption_line:
         base = caption_line.strip()
     
     if not base:
         base = file_info.get("file_name") or ""
     
+    # Sanitize the name
     sanitized = sanitize_filename(base)
-    base_name = os.path.splitext(sanitized)[0]
+    
+    # Only strip extension if it's in COMMON_EXTENSIONS (not .PRT, .RELEASE, etc.)
+    base_name = sanitized
+    for ext in COMMON_EXTENSIONS:
+        if sanitized.lower().endswith(ext.lower()):
+            # Remove the known video extension
+            base_name = sanitized[:-len(ext)]
+            break
     
     return base_name
     
-COMMON_EXTENSIONS = [".mp4", ".mkv", ".avi", ".mov", ".wmv"]
+COMMON_EXTENSIONS = [".mp4", ".mkv"]
 
 class DbManager:
     def __init__(self):
