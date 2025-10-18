@@ -412,6 +412,70 @@ class DbManager:
         except PyMongoError as e:
             LOGGER.error(f"Error checking file exists: {e}")
             return False
+            
+    async def check_files_exist_batch(self, file_infos_list):
+        """
+        Batch check if multiple files exist in catalog
+        Returns set of identifiers that exist
+        
+        Args:
+            file_infos_list: List of file_info dicts
+        
+        Returns:
+            set: Set of identifiers (file_unique_id, file_hash, sanitized_name) that exist
+        """
+        try:
+            if not file_infos_list:
+                return set()
+            
+            # Build lists of all identifiers to check
+            unique_ids = []
+            hashes = []
+            sanitized_names = []
+            
+            for file_info in file_infos_list:
+                if file_info.get('file_unique_id'):
+                    unique_ids.append(file_info['file_unique_id'])
+                if file_info.get('file_hash'):
+                    hashes.append(file_info['file_hash'])
+                if file_info.get('sanitized_name'):
+                    sanitized_names.append(file_info['sanitized_name'])
+            
+            # Build query with $or for all identifier types
+            or_conditions = []
+            if unique_ids:
+                or_conditions.append({'file_unique_id': {'$in': unique_ids}})
+            if hashes:
+                or_conditions.append({'file_hash': {'$in': hashes}})
+            if sanitized_names:
+                or_conditions.append({'sanitized_name': {'$in': sanitized_names}})
+            
+            if not or_conditions:
+                return set()
+            
+            query = {'$or': or_conditions}
+            
+            # Get all matching documents
+            cursor = self._db.file_catalog.find(
+                query,
+                {'file_unique_id': 1, 'file_hash': 1, 'sanitized_name': 1}
+            )
+            
+            # Build set of existing identifiers
+            existing = set()
+            async for doc in cursor:
+                if 'file_unique_id' in doc:
+                    existing.add(doc['file_unique_id'])
+                if 'file_hash' in doc:
+                    existing.add(doc['file_hash'])
+                if 'sanitized_name' in doc:
+                    existing.add(doc['sanitized_name'])
+            
+            return existing
+            
+        except PyMongoError as e:
+            LOGGER.error(f"Error in batch file check: {e}")
+            return set()            
 
     async def should_retry_failed_file(self, file_info, max_retries=2):
         """Check if a failed file should be retried based on retry count and time"""
