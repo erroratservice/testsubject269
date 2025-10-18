@@ -369,7 +369,6 @@ class DbManager:
                 
                 # Only if prt_mode is True, also check with XXX/PRT added
                 if prt_mode:
-                    # Insert XXX before .720p/.1080p and PRT before extension
                     enhanced_name = base_name
                     
                     # Add XXX before quality if not present
@@ -377,7 +376,8 @@ class DbManager:
                         enhanced_name = re.sub(r'(\.720p|\.1080p)', r'.XXX\1', enhanced_name, flags=re.IGNORECASE)
                     
                     # Add PRT before extension if not present
-                    if not re.search(r'\.PRT\.', enhanced_name, re.IGNORECASE):
+                    # FIXED: Check for .PRT at the end or before extension
+                    if not re.search(r'\.PRT(?:\.[a-z0-9]{3,4})?$', enhanced_name, re.IGNORECASE):
                         enhanced_name = re.sub(r'(\.[a-z0-9]{3,4})$', r'.PRT\1', enhanced_name, flags=re.IGNORECASE)
                     
                     # Only add if it's different from original
