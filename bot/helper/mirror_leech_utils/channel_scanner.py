@@ -35,6 +35,8 @@ class ChannelScanner:
         # Optimized timings for Telegram API limits
         self.batch_sleep = 2  # 2s between batches
         self.api_delay = 0.05  # 50ms between API calls
+        self.status_update_interval = 10
+        self.last_status_update = 0         
 
     async def scan(self, status_msg=None):
         """Main scanning function with ID-based batching"""
@@ -112,21 +114,19 @@ class ChannelScanner:
                 LOGGER.info("Scan cancelled by user")
                 break
             
-            # Generate batch of message IDs (200 at a time for optimal speed)
+            # Generate batch of message IDs
             message_ids = list(range(max(1, current_id - self.batch_size + 1), current_id + 1))
-            message_ids.reverse()  # Process newest to oldest
+            message_ids.reverse()
             
             batch_num += 1
             LOGGER.info(f"Batch {batch_num}: Fetching messages {message_ids[-1]}-{message_ids[0]}")
             
-            # Use BOT session to fetch batch (20 messages/sec = fast!)
             try:
                 messages = await self.bot_client.get_messages(
                     self.channel_id,
                     message_ids=message_ids
                 )
                 
-                # Filter out None/empty messages
                 valid_messages = [msg for msg in messages if msg and not isinstance(msg, int)]
                 
                 # Process batch
@@ -134,29 +134,30 @@ class ChannelScanner:
                 
                 self.processed += len(valid_messages)
                 
-                # Update status
-                progress_pct = (self.processed / total_messages * 100) if total_messages > 0 else 0
-                await self._update_status(
-                    f'🔍 Batch {batch_num} | {self.processed}/{total_messages} ({progress_pct:.1f}%)\n'
-                    f'✨ New: {self.db_entries} | 🔄 Skipped: {self.skipped_duplicates}'
-                )
+                # UPDATE STATUS WITH 10-SECOND THROTTLING
+                current_time = asyncio.get_event_loop().time()
+                if current_time - self.last_status_update >= self.status_update_interval:
+                    progress_pct = (self.processed / total_messages * 100) if total_messages > 0 else 0
+                    await self._update_status(
+                        f'🔍 Batch {batch_num} | {self.processed}/{total_messages} ({progress_pct:.1f}%)\n'
+                        f'✨ New: {self.db_entries} | 🔄 Skipped: {self.skipped_duplicates}'
+                    )
+                    self.last_status_update = current_time  # Update timestamp
+                    LOGGER.debug(f"Status updated at batch {batch_num}")
                 
-                # Sleep between batches to respect rate limits
+                # Sleep between batches
                 await asyncio.sleep(self.batch_sleep)
                 
             except FloodWait as e:
                 LOGGER.warning(f'FloodWait in batch: {e.x}s')
                 await asyncio.sleep(e.x + 1)
-                continue  # Retry this batch
+                continue
             
             except Exception as e:
                 LOGGER.error(f"Error fetching batch: {e}")
-                # Continue with next batch on error
             
-            # Move to next batch
             current_id -= self.batch_size
             
-            # Check max messages limit
             if self.max_messages > 0 and self.processed >= self.max_messages:
                 break
 
