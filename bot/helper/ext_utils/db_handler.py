@@ -390,21 +390,18 @@ class DbManager:
                                 query = {field: {"$regex": f"^{re.escape(pattern)}$", "$options": "i"}}
                                 result = await self._db.file_catalog.find_one(query, {"_id": 1})
                                 if result:
-                                    LOGGER.info(f"[DB] Duplicate found: {pattern} in {field}")
                                     return True
             
             # Check by file_unique_id
             if file_unique_id:
                 result = await self._db.file_catalog.find_one({"file_unique_id": file_unique_id}, {"_id": 1})
                 if result:
-                    LOGGER.info(f"[DB] Duplicate found by file_unique_id: {file_unique_id}")
                     return True
             
             # Check by file_hash
             if file_hash:
                 result = await self._db.file_catalog.find_one({"file_hash": file_hash}, {"_id": 1})
                 if result:
-                    LOGGER.info(f"[DB] Duplicate found by file_hash: {file_hash}")
                     return True
             
             return False
