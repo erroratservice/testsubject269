@@ -65,6 +65,7 @@ class SimpleChannelLeechCoordinator(TaskListener):
         self.use_caption_as_filename = True
         self.max_concurrent = 5
         self.check_interval = 10
+        self.prt_mode = False
         self.pending_files = []
         self.pending_file_ids = set()
         self.pending_sanitized_names = set()
@@ -243,38 +244,29 @@ class SimpleChannelLeechCoordinator(TaskListener):
                 return self.from_msg_id
             return self.resume_from_msg_id if self.resume_from_msg_id > 0 else 0
 
-    async def _is_download_duplicate(self, file_item):
+    async def is_download_duplicate(self, file_item):
         """Enhanced duplicate checking with queue integration and failed file handling"""
         try:
-            sanitized_name = self._generate_clean_filename(file_item['file_info'])
+            sanitized_name = self.generate_clean_filename(file_item['file_info'])
             file_info = file_item['file_info']
             
-            # Check our internal queue tracking
-            if sanitized_name in self.pending_sanitized_names:
+            # Check if already in our pending queue
+            if any(f['file_info'].get('file_unique_id') == file_info.get('file_unique_id') 
+                   for f in self.pending_files):
                 return True
             
-            file_unique_id = file_info.get('file_unique_id')
-            if file_unique_id and file_unique_id in self.pending_file_ids:
-                return True
-            
-            # Check bot's active download queue
-            url = file_item['url']
-            if url in self.our_active_links:
-                return True
-            
-            # Check global bot task queue
-            if await self._check_bot_task_queue(sanitized_name, url):
-                return True
+            # Check if in any active link's queue
+            for link_obj in list(self.our_active_links.values()):
+                if hasattr(link_obj, 'listener') and hasattr(link_obj.listener, 'name'):
+                    if link_obj.listener.name == sanitized_name:
+                        return True
             
             # Check if file already exists (includes both completed AND failed files)
-            if await database.check_file_exists(file_info=file_info):
-                # OPTIONAL: Check if failed file should be retried
-                # if not await database.should_retry_failed_file(file_info):
-                #     return True
+            # MODIFIED LINE - Pass prt_mode parameter
+            if await database.check_file_exists(file_info=file_info, prt_mode=self.prt_mode):
                 return True
             
             return False
-            
         except Exception as e:
             LOGGER.error(f"[cleech] Error checking duplicate: {e}")
             return False
@@ -668,6 +660,8 @@ class SimpleChannelLeechCoordinator(TaskListener):
         self.channel_id = args['channel']
         self.filter_tags = args.get('filter', [])
         self.filter_mode = args.get('filter_mode', 'and')
+        if self.filter_tags:
+            self.prt_mode = any('PRT' in str(tag).upper() for tag in self.filter_tags)        
         self.use_caption_as_filename = not args.get('no_caption', False)
         self.scan_type = args.get('type')
         
