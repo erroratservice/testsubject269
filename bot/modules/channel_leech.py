@@ -54,8 +54,9 @@ def enhance_prt_filename(filename):
     if not re.search(r'\bXXX\b', filename, re.IGNORECASE):
         filename = re.sub(r'(\.720p|\.1080p)', r'.XXX\1', filename, flags=re.IGNORECASE)
     
-    # Only enhance if PRT is missing (before the file extension)
-    if not re.search(r'\.PRT\.', filename, re.IGNORECASE):
+    # Only enhance if PRT is missing (check for .PRT followed by extension OR end of string)
+    # This prevents adding PRT if it's already there before the extension
+    if not re.search(r'\.PRT(?:\.[a-z0-9]{3,4})?$', filename, re.IGNORECASE):
         filename = re.sub(r'(\.[a-z0-9]{3,4})$', r'.PRT\1', filename, flags=re.IGNORECASE)
     
     return filename
